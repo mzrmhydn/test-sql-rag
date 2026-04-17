@@ -1,0 +1,196 @@
+"""
+API Server — FastAPI backend for SQL RAG (Ollama Edition).
+
+Exposes a POST /api/ask endpoint that accepts a question and returns
+the agent's answer.
+
+Usage:
+    python api.py
+"""
+
+import json
+import os
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from langchain_community.agent_toolkits import SQLDatabaseToolkit
+from langchain_community.utilities import SQLDatabase
+from langchain_community.vectorstores import FAISS
+from langchain_core.example_selectors import SemanticSimilarityExampleSelector
+from langchain_core.messages import SystemMessage
+from langchain_core.prompts import FewShotPromptTemplate, PromptTemplate
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel
+
+# ── Load environment variables ──────────────────────────────────────────
+_ = load_dotenv()
+
+# ── FastAPI App ─────────────────────────────────────────────────────────
+app = FastAPI(title="SQL RAG API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Request / Response Models ───────────────────────────────────────────
+class QuestionRequest(BaseModel):
+    question: str
+
+
+class AnswerResponse(BaseModel):
+    answer: str
+    steps: list[dict] = []
+
+
+# ── Global state (initialized on startup) ──────────────────────────────
+agent = None
+few_shot_prompt = None
+database = None
+fewshot_vectorstore = None
+
+# Similarity threshold for few-shot injection.
+# FAISS uses L2 distance: lower = more similar.
+# Only inject few-shot examples when the best match is below this value.
+FEWSHOT_SIMILARITY_THRESHOLD = 0.35
+
+
+def should_use_fewshot(question: str) -> bool:
+    """Check if the question is similar enough to any few-shot example
+    to benefit from few-shot injection. Uses FAISS L2 distance."""
+    if fewshot_vectorstore is None:
+        return False
+    results = fewshot_vectorstore.similarity_search_with_score(question, k=1)
+    if results:
+        _, score = results[0]
+        return score < FEWSHOT_SIMILARITY_THRESHOLD
+    return False
+
+
+@app.on_event("startup")
+def startup():
+    """Initialize agent and tools when the server starts."""
+    global agent, few_shot_prompt, database, fewshot_vectorstore
+
+    print("Loading database...", end=" ", flush=True)
+    database = SQLDatabase.from_uri("sqlite:///db/Chinook.db?mode=ro")
+    print("OK")
+
+    print("Loading LLM (llama3.1 via Ollama)...", end=" ", flush=True)
+    llm = ChatOllama(model="llama3.1", temperature=0)
+    print("OK")
+
+    print("Setting up SQL toolkit...", end=" ", flush=True)
+    toolkit = SQLDatabaseToolkit(db=database, llm=llm)
+    tools = toolkit.get_tools()
+    print("OK")
+
+    system_prompt = PromptTemplate.from_file(
+        template_file="prompts/system-prompt-template.txt"
+    )
+    system_message = SystemMessage(
+        content=system_prompt.format(
+            table_names=", ".join(database.get_usable_table_names())
+        )
+    )
+
+    print("Creating agent...", end=" ", flush=True)
+    agent = create_react_agent(
+        model=llm,
+        tools=tools,
+        prompt=system_message,
+    )
+    print("OK")
+
+    print("Loading few-shot examples...", end=" ", flush=True)
+    with open("examples/examples.json", encoding="utf-8") as f:
+        examples = json.load(f)
+
+    embeddings = OllamaEmbeddings(model="llama3.1")
+
+    example_selector = SemanticSimilarityExampleSelector.from_examples(
+        examples=examples,
+        embeddings=embeddings,
+        vectorstore_cls=FAISS,
+        k=4,
+        input_keys=["question"],
+    )
+
+    # Keep a reference to the vectorstore for similarity scoring
+    fewshot_vectorstore = example_selector.vectorstore
+
+    example_prompt = PromptTemplate.from_template(
+        "Question: {question}\nSQL query: {query}"
+    )
+
+    few_shot_prompt = FewShotPromptTemplate(
+        example_selector=example_selector,
+        example_prompt=example_prompt,
+        prefix="Here are some examples of questions and their corresponding SQL queries.",
+        suffix="Question: {question}\nSQL query: ",
+        input_variables=["question"],
+    )
+    print("OK")
+
+    print("\n[OK] API server ready!\n")
+
+
+@app.post("/api/ask", response_model=AnswerResponse)
+def ask_question(req: QuestionRequest):
+    """Answer a natural language question about the database."""
+    question = req.question.strip()
+
+    if should_use_fewshot(question):
+        user_input = few_shot_prompt.format(question=question)
+    else:
+        user_input = question
+
+    inputs = {"messages": [("human", user_input)]}
+
+    final_answer = ""
+    steps = []
+
+    for chunk in agent.stream(input=inputs, stream_mode="values"):
+        message = chunk["messages"][-1]
+
+        # Collect reasoning steps
+        msg_type = type(message).__name__
+        content = getattr(message, "content", "")
+        tool_calls = getattr(message, "tool_calls", [])
+        name = getattr(message, "name", None)
+
+        step = {"type": msg_type}
+        if content:
+            step["content"] = content
+        if tool_calls:
+            step["tool_calls"] = [
+                {"name": tc.get("name", ""), "args": tc.get("args", {})}
+                for tc in tool_calls
+            ]
+        if name:
+            step["tool_name"] = name
+        steps.append(step)
+
+        # The last AI message without tool calls is the final answer
+        if content and not tool_calls:
+            if msg_type == "AIMessage":
+                final_answer = content
+
+    return AnswerResponse(answer=final_answer, steps=steps)
+
+
+@app.get("/api/tables")
+def get_tables():
+    """Return the list of available tables."""
+    return {"tables": database.get_usable_table_names()}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
