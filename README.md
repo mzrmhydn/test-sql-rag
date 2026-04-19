@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is a clone of the [sql-rag](../README.md) project, adapted to use a **local LLM via Ollama** instead of Google's Gemini 1.5 Flash. Specifically, it uses the **Ollama Llama 2.5 7B** model (`llama3.1` / your configured model name).
+This project is a refactor of a generic SQL-RAG architecture, adapted to use a **local LLM via Ollama** instead of Google's Gemini 1.5 Flash. Specifically, it uses the **Ollama Llama 2.5 7B** model (`llama3.1` / your configured model name).
 
 At a high-level, the steps of the system are:
 
