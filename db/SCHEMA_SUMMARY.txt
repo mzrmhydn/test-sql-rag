@@ -71,9 +71,9 @@ EXACT CARDINALITIES BETWEEN ENTITIES
 
 ACADEMIC MODULE
 ---------------
-school       1 ---- 0..*  faculty             (faculty.school_id NOT NULL)
-school       1 ---- 0..*  program             (program.school_id NOT NULL)
-school       1 ---- 0..*  course              (course.school_id NOT NULL)
+school       1 ---- 1..*  faculty             (school must employ >=1 faculty; faculty.school_id NOT NULL)
+school       1 ---- 1..*  program             (school exists to offer >=1 program; program.school_id NOT NULL)
+school       1 ---- 1..*  course              (school owns >=1 course; course.school_id NOT NULL)
 program      1 ---- 0..*  student             (student.program_id NOT NULL)
 
 course       *  ---- *    course              (self-ref via prerequisite; 0..* on both sides)
@@ -90,10 +90,11 @@ student      *  ---- *    section             (via enrollment; junction carries 
 
 ADMISSIONS MODULE
 -----------------
-applicant    1 ---- 0..*  application         (application.applicant_id NOT NULL)
+applicant    1 ---- 1..*  application         (an applicant submits >=1 application; application.applicant_id NOT NULL)
 program      1 ---- 0..*  application         (application.program_id NOT NULL)
 term         1 ---- 0..*  application         (application.term_id NOT NULL; always Fall)
-applicant    *  ---- *    entry_test          (via test_attempt; junction carries score)
+applicant    *  ---- *    entry_test          (via test_attempt; an applicant takes >=1 NET, so
+                                               applicant 1..* test_attempt; junction carries score)
 application  1 ---- 0..1  offer               (offer.application_id UNIQUE; offer optional)
 
 CROSS-MODULE LINK
@@ -101,6 +102,104 @@ CROSS-MODULE LINK
 applicant    0..1 -- 0..1 student             (student.applicant_id NULLABLE;
                                                populated when an offer is Accepted;
                                                optional on both sides)
+
+================================================================================
+CARDINALITY JUSTIFICATIONS (real-world reasoning, per relationship)
+================================================================================
+
+Notation: 1 = exactly one (mandatory), 0..1 = zero-or-one (optional),
+          1..* = one-or-many (mandatory-many), 0..* = zero-or-many (optional-many).
+
+ACADEMIC MODULE
+---------------
+school       1  ---- 1..*  faculty
+    A school cannot operate without faculty; at least one faculty member is
+    required to deliver any program. Faculty.school_id is NOT NULL, so a
+    faculty member always belongs to exactly one school.
+
+school       1  ---- 1..*  program
+    A school exists precisely to offer programs; a school with zero programs
+    is not meaningful in NUST's structure. Program.school_id is NOT NULL.
+
+school       1  ---- 1..*  course
+    Courses are owned by the school that delivers them, and a functioning
+    school always owns at least one course in its catalogue.
+    Course.school_id is NOT NULL.
+
+program      1  ---- 0..*  student
+    A newly launched program may have zero admitted students until its first
+    intake closes. Once admissions run, students accumulate over time.
+    Student.program_id is NOT NULL, so every student has exactly one program.
+
+program      1  ---- 0..*  application
+    A freshly created program may have zero applications before its first
+    admission cycle opens. Application.program_id is NOT NULL.
+
+program      1..* ---- 1..*  course              (via program_course)
+    Every program must require at least one course (else it is not a
+    curriculum), and every course in the catalogue must be mapped to at
+    least one program (otherwise it would not be offered to anyone).
+
+course       0..* ---- 0..*  course              (self-reference via prerequisite)
+    Foundational courses have no prerequisites, and advanced courses may
+    themselves not be prerequisites of anything else; both sides are
+    therefore optional-many.
+
+course       1  ---- 0..*  section
+    A course exists in the catalogue year-round but is not necessarily
+    offered every term; some terms yield zero sections for a given course.
+    Section.course_code is NOT NULL.
+
+term         1  ---- 0..*  section
+    A newly created future term holds zero sections until the scheduling
+    committee publishes them. Section.term_id is NOT NULL.
+
+term         1  ---- 0..*  application
+    A future admission term has zero applications until the intake opens.
+    Application.term_id is NOT NULL.
+
+classroom    1  ---- 0..*  section
+    A classroom may sit unused in a given term (renovation, low demand,
+    reserved capacity), so zero sections per classroom is valid.
+    Section.classroom_id is NOT NULL.
+
+faculty      1  ---- 0..*  section
+    A faculty member on sabbatical, administrative duty, or research leave
+    may teach zero sections in a given term. Section.faculty_id is NOT NULL.
+
+student      0..* ---- 0..*  section              (via enrollment)
+    A newly admitted student in the pre-registration window has zero
+    enrollments; a section in the same window likewise has zero registrants
+    until add/drop closes. Both sides are therefore optional-many.
+
+ADMISSIONS MODULE
+-----------------
+applicant    1  ---- 1..*  application
+    Being an applicant is defined by having submitted at least one
+    application; a row in `applicant` with zero applications would not
+    exist in the first place. Application.applicant_id is NOT NULL.
+
+applicant    1  ---- 1..*  test_attempt
+    NUST admission requires sitting the NET at least once; an applicant
+    with zero test attempts cannot be evaluated. TestAttempt uses a
+    composite PK (applicant_id + test_id) with applicant_id NOT NULL.
+
+entry_test   1  ---- 0..*  test_attempt
+    A scheduled but not-yet-held test has zero attempts recorded.
+    TestAttempt.test_id is NOT NULL.
+
+application  1  ---- 0..1  offer
+    Only a subset of applications result in an offer (others are rejected,
+    withdrawn, or still pending); each application yields at most one
+    offer (offer.application_id is UNIQUE).
+
+CROSS-MODULE LINK
+-----------------
+applicant    0..1 ---- 0..1 student
+    Optional on both sides: an applicant may never convert (rejected or
+    declined => no student row), and the schema allows student.applicant_id
+    to be NULL as a data-migration escape hatch for legacy/imported student
+    records whose originating applicant is not tracked.
 
 ================================================================================
 TABLE INVENTORY

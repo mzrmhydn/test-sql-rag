@@ -1,8 +1,8 @@
 %% NUST University Database - Entity Relationship Diagram
 erDiagram
-    school ||--o{ faculty : "employs"
-    school ||--o{ program : "offers"
-    school ||--o{ course  : "owns"
+    school ||--|{ faculty : "employs"
+    school ||--|{ program : "offers"
+    school ||--|{ course  : "owns"
 
     program ||--o{ student : "registers"
     program ||--o{ application : "receives"
@@ -21,8 +21,8 @@ erDiagram
     student ||--o{ enrollment : "enrolls_in"
     section ||--o{ enrollment : "has_students"
 
-    applicant  ||--o{ application : "submits"
-    applicant  ||--o{ test_attempt : "attempts"
+    applicant  ||--|{ application : "submits"
+    applicant  ||--|{ test_attempt : "attempts"
     entry_test ||--o{ test_attempt : "taken_as"
     applicant  |o--o| student : "becomes"
 
