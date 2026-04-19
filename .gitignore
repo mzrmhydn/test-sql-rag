@@ -1,0 +1,44 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials*
+secrets*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Vector store / caches
+*.sqlite
+*.sqlite3
+chroma/
+.chroma/
+faiss_index/
+
+# Logs
+*.log
+logs/
