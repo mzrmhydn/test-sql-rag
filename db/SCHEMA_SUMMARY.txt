@@ -1,69 +1,86 @@
 ================================================================================
 NUST University Database - Schema Summary & Design Decisions
-Scope: Undergraduate (Bachelor's) Programs Only
+Scope: Undergraduate (Bachelor's) Programs (one 2-year MSIS entry for diversity)
 DBMS: MySQL 8.0+ (InnoDB)
 ================================================================================
 
 OVERVIEW
 --------
-The database models two modules that share the `program` and `term` tables:
+The database models two modules that share the `Program` table:
 
   1. ACADEMIC MODULE
-     school, faculty, program, course, prerequisite, program_course,
-     student, term, classroom, section, enrollment
+     School, Instructor, Program, Course, ProgramCourse,
+     Student, Term, Classroom, Section, Enrollment
 
   2. ADMISSIONS MODULE
-     applicant, entry_test, test_attempt, application, offer
+     Applicant, EntryTest, TestScore, Application
 
-The bridge between modules: when an applicant accepts an offer, a new
-`student` row is created with an optional FK `applicant_id` pointing back
-to the originating applicant, and `program_id` taken from the accepted
-application.
+  3. FINANCE (shared)
+     Fee  (unified ledger for Application fees and Student fees)
+
+The bridge between modules: when an applicant's Application is accepted, a
+new `Student` row is created whose ApplicationID FK points to that
+Application. The Applicant and Program of a Student are therefore reached
+through Student -> Application -> Applicant / Program (no denormalization).
 
 KEY DESIGN DECISIONS
 --------------------
-1. All primary keys are manually-assigned VARCHAR(20) alphanumeric IDs
-   (no AUTO_INCREMENT); this mirrors NUST's real identifiers
-   (e.g. 'SEECS', 'STU-001', 'CS351').
-2. `course.course_code` is the PK of course (per the prompt exception).
-3. Grades are stored as an ENUM on `enrollment.grade`; GPA points are
-   mapped in queries via a CASE expression (no lookup table).
-4. `enrollment.grade` is NULLABLE: NULL means "in progress, not yet graded".
-5. `enrollment.attendance_percentage` is tracked; a BEFORE UPDATE trigger
-   (`trg_enrollment_xf`) assigns grade 'XF' automatically when attendance
-   falls below 75.00.
-6. `applicant.best_test_score` is a denormalized best-score cache,
-   maintained by an AFTER INSERT trigger on `test_attempt`
-   (`trg_best_test_score`).
-7. `application` snapshots `high_school_score` and `best_test_score` at
-   submission time (so later test attempts do not retroactively change
-   existing applications). `aggregate_score = snapshot_hs + snapshot_best_test`.
-8. No separate merit-list tables; merit ranking is a RANK() query over
-   `application`.
-9. Semester tracking is handled by three columns:
-     program.total_semesters   (8 for BS/BE/BBA, 10 for B.Arch/LLB)
-     student.current_semester  (1..10, starts at 1)
-     program_course.recommended_semester (advisory)
-   A cross-check query counts distinct terms a student has enrolled in.
-10. Course type drives contact hours: Theory = credit*1, Lab/Project = credit*3.
-    `contact_hours` is physically stored and kept consistent by the INSERT data.
-11. ON DELETE RESTRICT is the default for FKs; CASCADE is used only for
-    junction tables (prerequisite, program_course, test_attempt, enrollment).
-12. Indexes exist on every FK column; composite UNIQUE on
-    application(applicant_id, program_id, term_id) prevents duplicate
-    applications; composite PK on prerequisite(course_code, prereq_course_code)
-    prevents duplicate prereq edges.
+1. All primary keys are AUTO_INCREMENT INTs. Human-readable codes live on
+   secondary columns with UNIQUE constraints (Course.CourseCode,
+   Program.DegreeType, School.Name, EntryTest.SeriesName, Term.TermName).
+2. Student is 1:1 with an accepted Application; Student.ApplicationID is
+   UNIQUE. Student does NOT carry ApplicantID or ProgramID directly.
+3. Course is owned by a School (Course.SchoolID), NOT a Program.
+   Program<->Course is a real M:N captured in ProgramCourse with
+   CourseType ('Core'/'Elective') and Semester (1..10) attributes.
+4. Unified Fee ledger. A single Fee table tracks both the per-application
+   processing fee (ApplicationID set, StudentID NULL, FeeType='Application')
+   and per-student tuition/hostel/library fees (StudentID set, ApplicationID
+   NULL, FeeType IN ('Tuition','Hostel','Library')). An XOR CHECK enforces
+   exactly one payer FK per row. A UNIQUE index on ApplicationID enforces
+   "at most one Application fee per Application" (MySQL treats multiple NULLs
+   as distinct in UNIQUE indexes, so student-fee rows with NULL ApplicationID
+   are unaffected).
+5. Enrollment separates Grade (nullable) from Status. Grade is NULL for
+   'InProgress' and 'Withdrawn' rows and is a letter (A, A-, B+, B, B-, C+,
+   C, C-, D+, D, F) for 'Completed' ones. A CHECK constraint enforces the
+   Grade/Status pairing.
+6. Applicant identity is stored in FirstName + LastName (no combined
+   full-name column). HighSchoolMarks is a raw 0..1100 integer; there is
+   no board-of-education column.
+7. An Application's outcome lives in Application.Status, valid values:
+   'Pending','Selected','Waitlisted','Rejected','Enrolled','Declined'.
+   The trigger AutoUpdateApplicationStatus promotes 'Selected' to
+   'Enrolled' whenever a Student row referencing that Application is
+   inserted.
+8. Classroom capacity is enforced by the BEFORE INSERT trigger
+   EnforceClassCapacity: any Enrollment that would push a Section past
+   its hosting Classroom's Capacity is rejected with SQLSTATE 45000.
+9. ON DELETE CASCADE is used for the junction tables (TestScore,
+   Application, ProgramCourse) so deleting a parent sweeps its junction
+   rows. Other FKs use the MySQL default (RESTRICT).
+10. Indexes exist on high-traffic FK/filter columns (Enrollment.StudentID,
+    Section.CourseID/TermID/InstructorID, Application.Status/ProgramID,
+    TestScore.TestID, Course.SchoolID, ProgramCourse.CourseID,
+    Fee.StudentID, Fee.FeeType).
+11. The schema ships with two views (StudentTranscript, ClassroomUtilization),
+    two stored procedures (GenerateTuitionChallan, AcceptAdmission), and one
+    function (IsEligibleForEngineering).
 
 TRIGGERS
 --------
-- trg_enrollment_xf       BEFORE UPDATE on enrollment   (attendance < 75 => XF)
-- trg_best_test_score     AFTER  INSERT on test_attempt (refresh applicant.best_test_score)
+- EnforceClassCapacity           BEFORE INSERT on Enrollment
+    (rejects the row if the hosting Section's Classroom is at capacity)
+- AutoUpdateApplicationStatus    AFTER  INSERT on Student
+    (flips the referenced Application from 'Selected' to 'Enrolled')
 
-GRADING SCALE
+GRADE LETTERS
 -------------
-A=4.0  B+=3.5  B=3.0  C+=2.5  C=2.0  D+=1.5  D=1.0
-F=0.0  XF=0.0  I=incomplete  W=withdrawn
-(I and W excluded from GPA calculations; XF counts as 0.0 fail.)
+Allowed values on Enrollment.Grade:
+    A, A-, B+, B, B-, C+, C, C-, D+, D, F
+Grade NULL means the row is 'InProgress' or 'Withdrawn'.
+Note: There is no CGPA calculation helper; Student.CGPA is stored directly
+as a DECIMAL(4,2) in [0.00, 4.00] and is maintained externally.
 
 ================================================================================
 EXACT CARDINALITIES BETWEEN ENTITIES
@@ -71,168 +88,143 @@ EXACT CARDINALITIES BETWEEN ENTITIES
 
 ACADEMIC MODULE
 ---------------
-school       1 ---- 1..*  faculty             (school must employ >=1 faculty; faculty.school_id NOT NULL)
-school       1 ---- 1..*  program             (school exists to offer >=1 program; program.school_id NOT NULL)
-school       1 ---- 1..*  course              (school owns >=1 course; course.school_id NOT NULL)
-program      1 ---- 0..*  student             (student.program_id NOT NULL)
+School       1 ---- 1..*  Program         (Program.SchoolID NOT NULL)
+School       1 ---- 0..*  Instructor      (Instructor.SchoolID NOT NULL)
+School       1 ---- 0..*  Course          (Course.SchoolID NOT NULL)
+School       1 ---- 0..*  Classroom       (Classroom.SchoolID NOT NULL)
 
-course       *  ---- *    course              (self-ref via prerequisite; 0..* on both sides)
-program      *  ---- *    course              (via program_course; each side 1..*; junction
-                                               adds recommended_semester)
+Program      *  ---- *    Course          (via ProgramCourse; junction adds
+                                           CourseType + Semester)
 
-course       1 ---- 0..*  section             (section.course_code NOT NULL)
-term         1 ---- 0..*  section             (section.term_id NOT NULL)
-classroom    1 ---- 0..*  section             (section.classroom_id NOT NULL)
-faculty      1 ---- 0..*  section             (section.faculty_id NOT NULL)
+Course       1 ---- 0..*  Section         (Section.CourseID NOT NULL)
+Term         1 ---- 0..*  Section         (Section.TermID NOT NULL)
+Instructor   1 ---- 0..*  Section         (Section.InstructorID NOT NULL)
+Classroom    1 ---- 0..*  Section         (Section.ClassroomID NOT NULL)
 
-student      *  ---- *    section             (via enrollment; junction carries grade
-                                               and attendance_percentage)
-
-ADMISSIONS MODULE
------------------
-applicant    1 ---- 1..*  application         (an applicant submits >=1 application; application.applicant_id NOT NULL)
-program      1 ---- 0..*  application         (application.program_id NOT NULL)
-term         1 ---- 0..*  application         (application.term_id NOT NULL; always Fall)
-applicant    *  ---- *    entry_test          (via test_attempt; an applicant takes >=1 NET, so
-                                               applicant 1..* test_attempt; junction carries score)
-application  1 ---- 0..1  offer               (offer.application_id UNIQUE; offer optional)
-
-CROSS-MODULE LINK
------------------
-applicant    0..1 -- 0..1 student             (student.applicant_id NULLABLE;
-                                               populated when an offer is Accepted;
-                                               optional on both sides)
-
-================================================================================
-CARDINALITY JUSTIFICATIONS (real-world reasoning, per relationship)
-================================================================================
-
-Notation: 1 = exactly one (mandatory), 0..1 = zero-or-one (optional),
-          1..* = one-or-many (mandatory-many), 0..* = zero-or-many (optional-many).
-
-ACADEMIC MODULE
----------------
-school       1  ---- 1..*  faculty
-    A school cannot operate without faculty; at least one faculty member is
-    required to deliver any program. Faculty.school_id is NOT NULL, so a
-    faculty member always belongs to exactly one school.
-
-school       1  ---- 1..*  program
-    A school exists precisely to offer programs; a school with zero programs
-    is not meaningful in NUST's structure. Program.school_id is NOT NULL.
-
-school       1  ---- 1..*  course
-    Courses are owned by the school that delivers them, and a functioning
-    school always owns at least one course in its catalogue.
-    Course.school_id is NOT NULL.
-
-program      1  ---- 0..*  student
-    A newly launched program may have zero admitted students until its first
-    intake closes. Once admissions run, students accumulate over time.
-    Student.program_id is NOT NULL, so every student has exactly one program.
-
-program      1  ---- 0..*  application
-    A freshly created program may have zero applications before its first
-    admission cycle opens. Application.program_id is NOT NULL.
-
-program      1..* ---- 1..*  course              (via program_course)
-    Every program must require at least one course (else it is not a
-    curriculum), and every course in the catalogue must be mapped to at
-    least one program (otherwise it would not be offered to anyone).
-
-course       0..* ---- 0..*  course              (self-reference via prerequisite)
-    Foundational courses have no prerequisites, and advanced courses may
-    themselves not be prerequisites of anything else; both sides are
-    therefore optional-many.
-
-course       1  ---- 0..*  section
-    A course exists in the catalogue year-round but is not necessarily
-    offered every term; some terms yield zero sections for a given course.
-    Section.course_code is NOT NULL.
-
-term         1  ---- 0..*  section
-    A newly created future term holds zero sections until the scheduling
-    committee publishes them. Section.term_id is NOT NULL.
-
-term         1  ---- 0..*  application
-    A future admission term has zero applications until the intake opens.
-    Application.term_id is NOT NULL.
-
-classroom    1  ---- 0..*  section
-    A classroom may sit unused in a given term (renovation, low demand,
-    reserved capacity), so zero sections per classroom is valid.
-    Section.classroom_id is NOT NULL.
-
-faculty      1  ---- 0..*  section
-    A faculty member on sabbatical, administrative duty, or research leave
-    may teach zero sections in a given term. Section.faculty_id is NOT NULL.
-
-student      0..* ---- 0..*  section              (via enrollment)
-    A newly admitted student in the pre-registration window has zero
-    enrollments; a section in the same window likewise has zero registrants
-    until add/drop closes. Both sides are therefore optional-many.
+Student      *  ---- *    Section         (via Enrollment; junction carries
+                                           Grade + Status)
 
 ADMISSIONS MODULE
 -----------------
-applicant    1  ---- 1..*  application
-    Being an applicant is defined by having submitted at least one
-    application; a row in `applicant` with zero applications would not
-    exist in the first place. Application.applicant_id is NOT NULL.
-
-applicant    1  ---- 1..*  test_attempt
-    NUST admission requires sitting the NET at least once; an applicant
-    with zero test attempts cannot be evaluated. TestAttempt uses a
-    composite PK (applicant_id + test_id) with applicant_id NOT NULL.
-
-entry_test   1  ---- 0..*  test_attempt
-    A scheduled but not-yet-held test has zero attempts recorded.
-    TestAttempt.test_id is NOT NULL.
-
-application  1  ---- 0..1  offer
-    Only a subset of applications result in an offer (others are rejected,
-    withdrawn, or still pending); each application yields at most one
-    offer (offer.application_id is UNIQUE).
+Applicant    1 ---- 0..*  Application     (Application.ApplicantID NOT NULL)
+Program      1 ---- 0..*  Application     (Application.ProgramID NOT NULL)
+Applicant    *  ---- *    EntryTest       (via TestScore; junction carries
+                                           Score 0..200)
 
 CROSS-MODULE LINK
 -----------------
-applicant    0..1 ---- 0..1 student
-    Optional on both sides: an applicant may never convert (rejected or
-    declined => no student row), and the schema allows student.applicant_id
-    to be NULL as a data-migration escape hatch for legacy/imported student
-    records whose originating applicant is not tracked.
+Application  1 ---- 0..1  Student         (Student.ApplicationID UNIQUE and
+                                           NOT NULL; a Student always exists
+                                           for exactly one Application)
+
+FEE (shared)
+------------
+Application  1 ---- 0..1  Fee             (Application-type fees; UNIQUE on
+                                           Fee.ApplicationID)
+Student      1 ---- 0..*  Fee             (Tuition/Hostel/Library fees; many
+                                           rows per Student)
 
 ================================================================================
 TABLE INVENTORY
 ================================================================================
-  1. school            (PK school_id)
-  2. faculty           (PK faculty_id;  FK school_id)
-  3. program           (PK program_id;  FK school_id)
-  4. course            (PK course_code; FK school_id)
-  5. prerequisite      (PK course_code + prereq_course_code)
-  6. program_course    (PK program_id + course_code;  recommended_semester)
-  7. term              (PK term_id;  UQ term_name + academic_year)
-  8. classroom         (PK classroom_id)
-  9. student           (PK student_id; FK program_id, FK applicant_id NULL)
- 10. section           (PK section_id; FK course_code, term_id, classroom_id, faculty_id)
- 11. enrollment        (PK student_id + section_id; attendance, grade)
- 12. applicant         (PK applicant_id)
- 13. entry_test        (PK test_id)
- 14. test_attempt      (PK applicant_id + test_id; score)
- 15. application       (PK application_id; UQ applicant_id+program_id+term_id)
- 16. offer             (PK offer_id; UQ application_id)
+  1. School         (PK SchoolID;        UQ Name)
+  2. Program        (PK ProgramID;       FK SchoolID; UQ (SchoolID, ProgramName))
+  3. Applicant      (PK ApplicantID;     UQ Email)
+  4. EntryTest      (PK TestID;          UQ SeriesName)
+  5. TestScore      (PK TestScoreID;     UQ (ApplicantID, TestID); FK Applicant, EntryTest)
+  6. Application    (PK ApplicationID;   UQ (ApplicantID, ProgramID); FK Applicant, Program)
+  7. Student        (PK StudentID;       UQ ApplicationID; FK Application)
+  8. Fee            (PK FeeID;           UQ ApplicationID; FK Application, Student; XOR payer)
+  9. Instructor     (PK InstructorID;    UQ Email; FK School)
+ 10. Course         (PK CourseID;        UQ CourseCode; FK School)
+ 11. ProgramCourse  (PK (ProgramID, CourseID); FK Program, Course)
+ 12. Term           (PK TermID;          UQ TermName)
+ 13. Classroom      (PK ClassroomID;     UQ (SchoolID, RoomNumber); FK School)
+ 14. Section        (PK SectionID;       UQ (CourseID, TermID, SectionName); FK Course, Term, Instructor, Classroom)
+ 15. Enrollment     (PK EnrollmentID;    UQ (StudentID, SectionID); FK Student, Section)
 
 ================================================================================
-DELIVERED QUERIES (in NUST.sql, all commented out)
+COLUMN CHEAT-SHEET (the most common query-time columns)
 ================================================================================
- Q1  Student transcript
- Q2  Semester GPA
- Q3  Cumulative GPA (CGPA)
- Q4  Courses recommended for a student's current semester
- Q5  Prerequisite check for a student and course
- Q6  Merit list ranking per program by aggregate score
- Q7  Faculty workload per term (sections + contact hours)
- Q8  Section enrollment vs classroom capacity
- Q9  Applicant offer summary
- Q10 Students at risk (attendance < 80%)
- Q11 Semester derivation cross-check
+School        : SchoolID, Name, Location, EstablishedYear
+Program       : ProgramID, SchoolID, ProgramName, DegreeType, DurationYears, TotalSeats
+Applicant     : ApplicantID, FirstName, LastName, Email, Phone, DOB,
+                HighSchoolMarks, City
+EntryTest     : TestID, SeriesName, TestDate,
+                TestType ('Engineering','Business','Architecture',
+                          'Biosciences','Chemical')
+TestScore     : TestScoreID, ApplicantID, TestID, Score
+Application   : ApplicationID, ApplicantID, ProgramID, ApplicationDate,
+                Preference (1..5),
+                Status ('Pending','Selected','Waitlisted','Rejected',
+                        'Enrolled','Declined')
+Student       : StudentID, ApplicationID, EnrollmentDate, CGPA,
+                Status ('Active','Graduated','Suspended','Withdrawn')
+Fee           : FeeID, ApplicationID, StudentID,
+                FeeType ('Application','Tuition','Hostel','Library'),
+                Amount, PaymentDate,
+                Method ('Bank','Online','Cheque','Cash')
+Instructor    : InstructorID, SchoolID, FirstName, LastName,
+                Title ('Lecturer','Assistant Professor',
+                       'Associate Professor','Professor'), Email, HireDate
+Course        : CourseID, SchoolID, CourseCode, CourseName, Credits
+ProgramCourse : ProgramID, CourseID,
+                CourseType ('Core','Elective'), Semester (1..10)
+Term          : TermID, TermName (e.g. 'Fall 2025'), StartDate, EndDate
+Classroom     : ClassroomID, SchoolID, RoomNumber, Capacity,
+                RoomType ('Lecture','Lab','Studio','Hall')
+Section       : SectionID, CourseID, TermID, InstructorID, ClassroomID,
+                SectionName
+Enrollment    : EnrollmentID, StudentID, SectionID, Grade,
+                Status ('InProgress','Completed','Withdrawn')
+
+================================================================================
+COMMON JOIN RECIPES
+================================================================================
+
+Student -> Applicant (name, contact):
+    Student JOIN Application ON Application.ApplicationID = Student.ApplicationID
+            JOIN Applicant   ON Applicant.ApplicantID   = Application.ApplicantID
+
+Student -> Program / School:
+    Student JOIN Application ON Application.ApplicationID = Student.ApplicationID
+            JOIN Program     ON Program.ProgramID         = Application.ProgramID
+            JOIN School      ON School.SchoolID           = Program.SchoolID
+
+Applicant -> best NET score:
+    Applicant LEFT JOIN TestScore ON TestScore.ApplicantID = Applicant.ApplicantID
+    (use MAX(TestScore.Score) in a GROUP BY)
+
+Student transcript (course + term + grade):
+    Enrollment JOIN Section ON Section.SectionID = Enrollment.SectionID
+               JOIN Course  ON Course.CourseID   = Section.CourseID
+               JOIN Term    ON Term.TermID       = Section.TermID
+
+Curriculum for a program:
+    ProgramCourse JOIN Course  ON Course.CourseID   = ProgramCourse.CourseID
+                  JOIN Program ON Program.ProgramID = ProgramCourse.ProgramID
+
+Application-type fees:
+    Fee WHERE FeeType = 'Application'      (key: Fee.ApplicationID)
+Student-type fees:
+    Fee WHERE FeeType IN ('Tuition','Hostel','Library')
+        (key: Fee.StudentID; Fee.ApplicationID IS NULL)
+
+================================================================================
+VIEWS, PROCEDURES, FUNCTIONS (defined in NUST.sql)
+================================================================================
+  VIEW StudentTranscript       - per-enrollment row with student name, program,
+                                 course, term, grade, and enrollment status
+  VIEW ClassroomUtilization    - sections hosted per classroom with capacity
+
+  PROCEDURE GenerateTuitionChallan(p_student_id, p_amount)
+                                - inserts a Tuition Fee row for the student
+  PROCEDURE AcceptAdmission(p_application_id, p_enrollment_date, p_tuition_amount)
+                                - transactionally creates Student + first
+                                  Tuition Fee; the Application is auto-
+                                  promoted to 'Enrolled' by the trigger
+
+  FUNCTION  IsEligibleForEngineering(p_applicant_id)
+                                - TRUE iff applicant's best Engineering-type
+                                  NET score is >= 140
 ================================================================================
