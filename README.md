@@ -1,6 +1,6 @@
-# NUST SQL RAG — Natural Language University Database Assistant
+# NUST SQL RAG — NUST Database Assistant
 
-A Retrieval-Augmented Generation (RAG) system that lets non-technical staff query a comprehensive NUST university management database using plain English. Ask questions about admissions, student records, courses, fees, and more — no SQL knowledge required.
+A Retrieval-Augmented Generation (RAG) system that lets non-technical staff query a comprehensive NUST university management database using plain English. Ask questions about admissions, student records, courses, and more — no SQL knowledge required.
 
 ![Use Case Diagram](img/sql_usecase.png)
 
