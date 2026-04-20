@@ -29,6 +29,16 @@ function App() {
 
   const SCHEMA_QUESTION = 'Show me the database schema';
 
+  const isSchemaRequest = (q) => {
+    const cleaned = q.trim().toLowerCase().replace(/[?.!,]/g, '');
+    if (!/\bschemas?\b/.test(cleaned)) return false;
+    const intentVerbs = /\b(show|get|give|list|display|describe|what|whats|fetch|see|view|print|return|provide|tell|share|explain|output)\b/;
+    if (intentVerbs.test(cleaned)) return true;
+    const words = cleaned.split(/\s+/).filter(Boolean);
+    const fillers = new Set(['the', 'a', 'an', 'db', 'database', 'please', 'pls', 'me', 'my', 'our', 'your', 'of', 'for']);
+    return words.every((w) => w === 'schema' || w === 'schemas' || fillers.has(w));
+  };
+
   const sendQuestion = async () => {
     const question = input.trim();
     if (!question || isLoading) return;
@@ -38,7 +48,7 @@ function App() {
     setIsLoading(true);
 
     try {
-      if (/\bschema\b/i.test(question)) {
+      if (isSchemaRequest(question)) {
         const response = await fetch('/api/schema');
         if (!response.ok) {
           throw new Error(`Server error: ${response.status}`);

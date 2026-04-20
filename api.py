@@ -19,7 +19,7 @@ from langchain_community.utilities import SQLDatabase
 from langchain_community.vectorstores import FAISS
 from langchain_core.example_selectors import SemanticSimilarityExampleSelector
 from langchain_core.messages import SystemMessage
-from langchain_core.prompts import FewShotPromptTemplate, PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel
@@ -52,7 +52,6 @@ class AnswerResponse(BaseModel):
 
 # ── Global state (initialized on startup) ──────────────────────────────
 agent = None
-few_shot_prompt = None
 database = None
 fewshot_vectorstore = None
 
@@ -62,22 +61,30 @@ fewshot_vectorstore = None
 FEWSHOT_SIMILARITY_THRESHOLD = 0.35
 
 
-def should_use_fewshot(question: str) -> bool:
-    """Check if the question is similar enough to any few-shot example
-    to benefit from few-shot injection. Uses FAISS L2 distance."""
+def build_user_input(question: str) -> str:
+    """Embed the question once, decide whether to inject few-shot examples,
+    and build the final user input string."""
     if fewshot_vectorstore is None:
-        return False
-    results = fewshot_vectorstore.similarity_search_with_score(question, k=1)
-    if results:
-        _, score = results[0]
-        return score < FEWSHOT_SIMILARITY_THRESHOLD
-    return False
+        return question
+    results = fewshot_vectorstore.similarity_search_with_score(question, k=4)
+    if not results or results[0][1] >= FEWSHOT_SIMILARITY_THRESHOLD:
+        return question
+    examples_block = "\n\n".join(
+        f"Question: {doc.metadata.get('question', doc.page_content)}\n"
+        f"SQL query: {doc.metadata.get('query', '')}"
+        for doc, _ in results
+    )
+    return (
+        "Here are some examples of questions and their corresponding SQL queries.\n\n"
+        f"{examples_block}\n\n"
+        f"Question: {question}\nSQL query: "
+    )
 
 
 @app.on_event("startup")
 def startup():
     """Initialize agent and tools when the server starts."""
-    global agent, few_shot_prompt, database, fewshot_vectorstore
+    global agent, database, fewshot_vectorstore
 
     print("Loading database...", end=" ", flush=True)
     mysql_user = os.getenv("MYSQL_USER", "root")
@@ -106,7 +113,7 @@ def startup():
     )
     system_message = SystemMessage(
         content=system_prompt.format(
-            table_names=", ".join(database.get_usable_table_names())
+            schema=database.get_table_info()
         )
     )
 
@@ -122,7 +129,8 @@ def startup():
     with open("examples/examples.json", encoding="utf-8") as f:
         examples = json.load(f)
 
-    embeddings = OllamaEmbeddings(model="llama3.1")
+    embed_model = os.getenv("OLLAMA_EMBED_MODEL", "llama3.1")
+    embeddings = OllamaEmbeddings(model=embed_model)
 
     example_selector = SemanticSimilarityExampleSelector.from_examples(
         examples=examples,
@@ -131,21 +139,7 @@ def startup():
         k=4,
         input_keys=["question"],
     )
-
-    # Keep a reference to the vectorstore for similarity scoring
     fewshot_vectorstore = example_selector.vectorstore
-
-    example_prompt = PromptTemplate.from_template(
-        "Question: {question}\nSQL query: {query}"
-    )
-
-    few_shot_prompt = FewShotPromptTemplate(
-        example_selector=example_selector,
-        example_prompt=example_prompt,
-        prefix="Here are some examples of questions and their corresponding SQL queries.",
-        suffix="Question: {question}\nSQL query: ",
-        input_variables=["question"],
-    )
     print("OK")
 
     print("\n[OK] API server ready!\n")
@@ -156,10 +150,7 @@ def ask_question(req: QuestionRequest):
     """Answer a natural language question about the database."""
     question = req.question.strip()
 
-    if should_use_fewshot(question):
-        user_input = few_shot_prompt.format(question=question)
-    else:
-        user_input = question
+    user_input = build_user_input(question)
 
     inputs = {"messages": [("human", user_input)]}
 
