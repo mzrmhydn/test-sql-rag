@@ -23,6 +23,7 @@ from langchain_core.prompts import FewShotPromptTemplate, PromptTemplate
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel
+from sqlalchemy import inspect as sa_inspect
 
 # ── Load environment variables ──────────────────────────────────────────
 _ = load_dotenv()
@@ -198,6 +199,17 @@ def ask_question(req: QuestionRequest):
 def get_tables():
     """Return the list of available tables."""
     return {"tables": database.get_usable_table_names()}
+
+
+@app.get("/api/schema")
+def get_schema():
+    """Return a summarized schema: each table mapped to its column names."""
+    inspector = sa_inspect(database._engine)
+    schema = {
+        table_name: [col["name"] for col in inspector.get_columns(table_name)]
+        for table_name in database.get_usable_table_names()
+    }
+    return {"schema": schema}
 
 
 if __name__ == "__main__":
