@@ -27,6 +27,8 @@ function App() {
     inputRef.current?.focus();
   }, []);
 
+  const SCHEMA_QUESTION = 'Show me the database schema';
+
   const sendQuestion = async () => {
     const question = input.trim();
     if (!question || isLoading) return;
@@ -36,6 +38,27 @@ function App() {
     setIsLoading(true);
 
     try {
+      if (question.toLowerCase() === SCHEMA_QUESTION.toLowerCase()) {
+        const response = await fetch('/api/schema');
+        if (!response.ok) {
+          throw new Error(`Server error: ${response.status}`);
+        }
+        const data = await response.json();
+        const schemaText = Object.entries(data.schema || {})
+          .map(([table, cols]) => `• ${table} (${cols.join(', ')})`)
+          .join('\n');
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'ai',
+            content: schemaText
+              ? `Here is a summary of the database schema:\n\n${schemaText}\n\nFeel free to ask questions about any of these tables or columns.`
+              : 'No tables found in the database.',
+          },
+        ]);
+        return;
+      }
+
       const response = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -82,6 +105,7 @@ function App() {
   };
 
   const quickQuestions = [
+    SCHEMA_QUESTION,
     'Which program received the most applications?',
     'List the top 5 applicants by NET score.',
     'How many students are enrolled in each program?',
