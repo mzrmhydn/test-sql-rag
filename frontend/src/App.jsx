@@ -119,6 +119,7 @@ function App() {
     'Which program received the most applications?',
     'List the top 5 applicants by NET score.',
     'How many students are enrolled in each program?',
+    'What is the average GPA of students by program?',
   ];
 
   return (
@@ -169,7 +170,7 @@ function App() {
                 {/* Content */}
                 <div className="message-content">
                   <span className="message-label">{msg.role === 'ai' ? 'NUST DBS Agent' : 'You'}</span>
-                  <p className="message-text">{msg.content}</p>
+                  <p className="message-text" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</p>
 
                   {/* Steps toggle */}
                   {msg.steps && msg.steps.length > 0 && (

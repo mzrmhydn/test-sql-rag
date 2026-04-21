@@ -1,6 +1,6 @@
 ================================================================================
 NUST University Database - Schema Summary & Design Decisions
-Scope: Undergraduate (Bachelor's) programs, plus one 2-year MSIS entry for diversity
+Scope: Undergraduate (Bachelor's) programs only (BS, BE, BBA, BArch)
 DBMS:  MySQL 8.0+ (InnoDB, utf8mb4)
 ================================================================================
 
@@ -69,8 +69,9 @@ KEY DESIGN DECISIONS
    student.program_id, prerequisite.prereq_course_code, faculty.school_id.
 
 9. The schema ships with two views (student_transcript,
-   classroom_utilization), one stored procedure (accept_admission), and
-   one function (is_eligible_for_engineering).
+   classroom_utilization), two stored procedures (accept_admission,
+   transfer_student_to_section), and one function
+   (is_eligible_for_engineering).
 
 TRIGGERS
 --------
@@ -165,7 +166,8 @@ TABLE INVENTORY (16 tables)
  13. offer           (PK offer_id;         FK application_id;
                       UQ application_id)
  14. student         (PK student_id;       FK program, applicant;
-                      UQ applicant_id, email)
+                      UQ applicant_id, email;
+                      gpa DECIMAL(3,2) nullable)
  15. section         (PK section_id;       FK course, term, classroom, faculty;
                       UQ (course_code, term_id, section_label))
  16. enrollment      (PK (student_id, section_id);
@@ -181,7 +183,7 @@ faculty        : faculty_id, school_id, full_name, email,
 program        : program_id, school_id, program_name,
                  degree_type ('BS','BE','BBA','BArch','MS','PhD'),
                  total_semesters, total_credits, total_seats
-                 (Seed program codes: 'BSCS','BESE','BEE','MSIS','BME','BIME',
+                 (Seed program codes: 'BSCS','BESE','BEE','BME','BIME',
                   'BBA','BSAF','BECE','BArch','BSAB','BChemE')
 course         : course_code, school_id, course_title,
                  course_type ('Theory','Lab','Theory+Lab','Studio','Seminar'),
@@ -199,7 +201,7 @@ applicant      : applicant_id, full_name, cnic, email,
                  high_school_score (0..1100),
                  best_test_score (0..200, NULL allowed)
 entry_test     : test_id,
-                 test_type ('Engineering','Business','Architecture',
+                 test_type ('Engineering','CS','Business','Architecture',
                             'Biosciences','Chemical'),
                  test_date, total_marks
 test_attempt   : applicant_id, test_id, score (>=0)
@@ -211,7 +213,8 @@ application    : application_id, applicant_id, program_id, term_id,
 offer          : offer_id, application_id, issue_date, expiry_date,
                  status ('Issued','Accepted','Declined','Expired')
 student        : student_id, program_id, applicant_id, full_name, email,
-                 current_semester (1..14), enrollment_date
+                 current_semester (1..14), enrollment_date,
+                 gpa (DECIMAL(3,2), 0.00..4.00, NULL until grades are posted)
 section        : section_id, course_code, term_id, classroom_id, faculty_id,
                  section_label (e.g. 'A','B')
 enrollment     : student_id, section_id, attendance_percentage (0..100, NULL ok),
@@ -291,6 +294,16 @@ VIEWS, PROCEDURES, FUNCTIONS (defined in NUST.sql)
                                   matching application from 'Selected' to
                                   'Enrolled' and flips the offer from 'Issued'
                                   to 'Accepted'. Any failure rolls back.
+
+  PROCEDURE transfer_student_to_section(p_student_id, p_from_section,
+                                        p_to_section)
+                                - atomically moves a student from one section
+                                  to another within a term, preserving
+                                  attendance_percentage. If the destination
+                                  section is at capacity, enforce_class_capacity
+                                  raises SIGNAL and the EXIT HANDLER rolls back
+                                  the DELETE so the student is not left without
+                                  a seat.
 
   FUNCTION  is_eligible_for_engineering(p_applicant_id)
                                 - Returns BOOLEAN. TRUE iff the applicant

@@ -10,6 +10,7 @@ Usage:
 
 import json
 import os
+import re
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -63,22 +64,90 @@ FEWSHOT_SIMILARITY_THRESHOLD = 0.35
 
 def build_user_input(question: str) -> str:
     """Embed the question once, decide whether to inject few-shot examples,
-    and build the final user input string."""
+    and build the final user input string.
+
+    Examples are attached as a reference block for the agent's internal use.
+    We explicitly avoid the "Question: ... SQL query: " completion-template
+    format, which causes small tool-calling models (e.g. llama3.1) to answer
+    with free-text SQL instead of invoking the sql_db_query tool.
+    """
     if fewshot_vectorstore is None:
         return question
     results = fewshot_vectorstore.similarity_search_with_score(question, k=4)
     if not results or results[0][1] >= FEWSHOT_SIMILARITY_THRESHOLD:
         return question
-    examples_block = "\n\n".join(
-        f"Question: {doc.metadata.get('question', doc.page_content)}\n"
-        f"SQL query: {doc.metadata.get('query', '')}"
-        for doc, _ in results
-    )
+
+    reference_lines = []
+    for doc, _ in results:
+        q = doc.metadata.get("question", doc.page_content)
+        sql = doc.metadata.get("query", "")
+        reference_lines.append(f"- Similar question: {q}\n  Reference SQL: {sql}")
+    reference_block = "\n".join(reference_lines)
+
     return (
-        "Here are some examples of questions and their corresponding SQL queries.\n\n"
-        f"{examples_block}\n\n"
-        f"Question: {question}\nSQL query: "
+        f"User question: {question}\n\n"
+        "The following reference SQL snippets are for your internal guidance "
+        "only. They may or may not match the user's intent — adapt as needed. "
+        "Do not quote them to the user, do not echo any SQL in your final "
+        "answer, and always execute your chosen query with the sql_db_query "
+        "tool before answering.\n\n"
+        f"{reference_block}"
     )
+
+
+# ── Final-answer sanitizer ─────────────────────────────────────────────
+_SQL_FENCE_RE = re.compile(r"```(?:sql|mysql)?\s*.*?```", re.DOTALL | re.IGNORECASE)
+_PIPE_TABLE_LINE_RE = re.compile(r"^\s*\+[-+]+\+\s*$|^\s*\|.*\|\s*$")
+_PREAMBLE_RE = re.compile(
+    r"^(to answer (the|this|your) (user'?s )?question[^\n]*\.?\s*)+",
+    re.IGNORECASE,
+)
+_LETS_RE = re.compile(
+    r"^(let'?s (use|run|execute|double[- ]?check)[^\n]*\.?\s*)+",
+    re.IGNORECASE,
+)
+_HERE_IS_QUERY_RE = re.compile(
+    r"^(here(?:'s| is) (the|a|my) (mysql )?query[^\n]*:?\s*)+",
+    re.IGNORECASE,
+)
+
+
+def _strip_pipe_tables(text: str) -> str:
+    """Remove ASCII/markdown pipe-tables — the model sometimes inlines a fake
+    rendering of the tool result. The real data is already in the steps."""
+    kept = []
+    for line in text.splitlines():
+        if _PIPE_TABLE_LINE_RE.match(line):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def sanitize_final_answer(text: str) -> str:
+    """Remove reasoning artifacts that leak into the final AIMessage.
+
+    The agent prompt forbids SQL, code fences, pipe tables, and "To answer…"
+    preambles, but small local models don't always obey. This is the last
+    line of defense before the answer reaches the user.
+    """
+    if not text:
+        return text
+
+    cleaned = _SQL_FENCE_RE.sub("", text)
+    cleaned = _strip_pipe_tables(cleaned)
+
+    # Drop leading preamble sentences iteratively.
+    prev = None
+    while prev != cleaned:
+        prev = cleaned
+        cleaned = cleaned.lstrip()
+        cleaned = _PREAMBLE_RE.sub("", cleaned)
+        cleaned = _LETS_RE.sub("", cleaned)
+        cleaned = _HERE_IS_QUERY_RE.sub("", cleaned)
+
+    # Collapse runs of blank lines.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
 
 
 @app.on_event("startup")
@@ -183,7 +252,10 @@ def ask_question(req: QuestionRequest):
             if msg_type == "AIMessage":
                 final_answer = content
 
-    return AnswerResponse(answer=final_answer, steps=steps)
+    return AnswerResponse(
+        answer=sanitize_final_answer(final_answer),
+        steps=steps,
+    )
 
 
 @app.get("/api/tables")

@@ -250,10 +250,12 @@ CREATE TABLE student (
     email             VARCHAR(100) NOT NULL,
     current_semester  TINYINT      NOT NULL DEFAULT 1,
     enrollment_date   DATE         NOT NULL,
+    gpa               DECIMAL(3,2),
     PRIMARY KEY (student_id),
     UNIQUE KEY uq_student_applicant (applicant_id),
     UNIQUE KEY uq_student_email     (email),
     CONSTRAINT chk_student_semester CHECK (current_semester BETWEEN 1 AND 14),
+    CONSTRAINT chk_student_gpa      CHECK (gpa IS NULL OR gpa BETWEEN 0.00 AND 4.00),
     FOREIGN KEY (program_id)   REFERENCES program(program_id),
     FOREIGN KEY (applicant_id) REFERENCES applicant(applicant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -687,17 +689,19 @@ INSERT INTO offer (offer_id, application_id, issue_date, expiry_date, status) VA
 -- matching application from 'Selected' to 'Enrolled' and the offer from
 -- 'Issued' to 'Accepted'. Cohort 1 (FA25) students are now in current_semester=2;
 -- Cohort 2 (FA26) students are starting current_semester=1.
-INSERT INTO student (student_id, program_id, applicant_id, full_name, email, current_semester, enrollment_date) VALUES
-('S001','BSCS' ,'A0001','Ali Khan'    ,'ali.khan@student.nust.edu.pk'    ,2,'2025-09-01'),
-('S002','BESE' ,'A0002','Aisha Ahmed' ,'aisha.ahmed@student.nust.edu.pk' ,2,'2025-09-01'),
-('S003','BME'  ,'A0003','Bilal Tariq' ,'bilal.tariq@student.nust.edu.pk' ,2,'2025-09-01'),
-('S004','BBA'  ,'A0004','Fatima Zahra','fatima.zahra@student.nust.edu.pk',2,'2025-09-01'),
-('S005','BSCS' ,'A0005','Saad Hussain','saad.hussain@student.nust.edu.pk',2,'2025-09-01'),
-('S006','BESE' ,'A0007','Zainab Rizvi','zainab.rizvi@student.nust.edu.pk',1,'2026-09-01'),
-('S007','BSCS' ,'A0009','Sana Iqbal'  ,'sana.iqbal@student.nust.edu.pk'  ,1,'2026-09-01'),
-('S008','BECE' ,'A0010','Usman Ali'   ,'usman.ali@student.nust.edu.pk'   ,1,'2026-09-01'),
-('S009','BArch','A0011','Hina Malik'  ,'hina.malik@student.nust.edu.pk'  ,1,'2026-09-01'),
-('S010','BSAB' ,'A0013','Noor Fatima' ,'noor.fatima@student.nust.edu.pk' ,1,'2026-09-01');
+-- gpa is computed from completed enrollment grades; NULL for students who
+-- have no finalized grades yet (Cohort 2, still in their first semester).
+INSERT INTO student (student_id, program_id, applicant_id, full_name, email, current_semester, enrollment_date, gpa) VALUES
+('S001','BSCS' ,'A0001','Ali Khan'    ,'ali.khan@student.nust.edu.pk'    ,2,'2025-09-01',3.67),
+('S002','BESE' ,'A0002','Aisha Ahmed' ,'aisha.ahmed@student.nust.edu.pk' ,2,'2025-09-01',3.74),
+('S003','BME'  ,'A0003','Bilal Tariq' ,'bilal.tariq@student.nust.edu.pk' ,2,'2025-09-01',3.50),
+('S004','BBA'  ,'A0004','Fatima Zahra','fatima.zahra@student.nust.edu.pk',2,'2025-09-01',4.00),
+('S005','BSCS' ,'A0005','Saad Hussain','saad.hussain@student.nust.edu.pk',2,'2025-09-01',3.15),
+('S006','BESE' ,'A0007','Zainab Rizvi','zainab.rizvi@student.nust.edu.pk',1,'2026-09-01',NULL),
+('S007','BSCS' ,'A0009','Sana Iqbal'  ,'sana.iqbal@student.nust.edu.pk'  ,1,'2026-09-01',NULL),
+('S008','BECE' ,'A0010','Usman Ali'   ,'usman.ali@student.nust.edu.pk'   ,1,'2026-09-01',NULL),
+('S009','BArch','A0011','Hina Malik'  ,'hina.malik@student.nust.edu.pk'  ,1,'2026-09-01',NULL),
+('S010','BSAB' ,'A0013','Noor Fatima' ,'noor.fatima@student.nust.edu.pk' ,1,'2026-09-01',NULL);
 
 -- 15. section ------------------------------------------------------------
 INSERT INTO section (section_id, course_code, term_id, classroom_id, faculty_id, section_label) VALUES
@@ -828,10 +832,10 @@ BEGIN
 
     INSERT INTO student
         (student_id, program_id, applicant_id, full_name, email,
-         current_semester, enrollment_date)
+         current_semester, enrollment_date, gpa)
     VALUES
         (p_student_id, p_program_id, p_applicant_id, p_full_name, p_email,
-         1, p_enrollment_date);
+         1, p_enrollment_date, NULL);
 
     COMMIT;
 END //
@@ -915,10 +919,10 @@ DELIMITER ;
 -- START TRANSACTION;
 --   INSERT INTO student
 --     (student_id, program_id, applicant_id, full_name, email,
---      current_semester, enrollment_date)
+--      current_semester, enrollment_date, gpa)
 --   VALUES
 --     ('S011','BBA','A0015','Sara Khan',
---      'sara.khan@student.nust.edu.pk',1,'2026-09-01');
+--      'sara.khan@student.nust.edu.pk',1,'2026-09-01',NULL);
 --
 --   -- If anything above raised, issue: ROLLBACK;
 -- COMMIT;
