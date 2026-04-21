@@ -43,7 +43,7 @@ This system wraps a custom MySQL university database with an AI agent running lo
 - **Self-corrects** bad SQL using a LangGraph ReAct reasoning loop
 - Runs entirely **locally** — no cloud LLM API keys required (uses Ollama)
 
-**Supported domains:** Admissions, Entry Tests, Programs, Courses, Students, Instructors, Fees, Enrollments, Classrooms, Terms.
+**Supported domains:** Admissions, Entry Tests, Programs, Courses, Students, Faculty, Enrollments, Classrooms, Terms.
 
 **Security:** The agent is read-only — it can only run `SELECT` queries. No data can be modified through the chat interface.
 
@@ -88,15 +88,13 @@ The agent uses a **ReAct loop**: it inspects the schema, generates SQL, validate
 
 ## Database Schema
 
-The `nust_university` database models the full student lifecycle across 15 tables:
+The `nust_university` database models the full student lifecycle across 16 tables:
 
-**Admissions pipeline:** `Applicant` → `EntryTest` (via `TestScore`) → `Application` → `Student`
+**Admissions pipeline:** `applicant` → `entry_test` (via `test_attempt`) → `application` → `offer` → `student`
 
-**Academic pipeline:** `School` → `Program` / `Course` (via `ProgramCourse`) → `Section` (per `Term`, `Instructor`, `Classroom`) → `Enrollment`
+**Academic pipeline:** `school` → `program` / `course` (via `program_course`, `prerequisite`) → `section` (per `term`, `faculty`, `classroom`) → `enrollment`
 
-**Financials:** `Fee` table (unified ledger for application fees, tuition, hostel, library)
-
-The schema includes check constraints, triggers (capacity enforcement, auto status updates), views (student transcript, classroom utilization), and stored procedures (admit student, generate challan). See [db/NUST.sql](db/NUST.sql) for the full definition.
+The schema includes check constraints, triggers (capacity enforcement, auto status updates), views (student transcript, classroom utilization), and stored procedures. See [db/NUST.sql](db/NUST.sql) for the full definition.
 
 ---
 
@@ -243,7 +241,7 @@ Verify it worked:
 mysql -u root -p --execute "USE nust_university; SHOW TABLES;"
 ```
 
-You should see 15 tables listed (Applicant, Application, Classroom, Course, Enrollment, EntryTest, Fee, Instructor, Program, ProgramCourse, School, Section, Student, Term, TestScore).
+You should see 16 tables listed (applicant, application, classroom, course, enrollment, entry_test, faculty, offer, prerequisite, program, program_course, school, section, student, term, test_attempt).
 
 ### 4. Set Up Python Backend
 
@@ -331,16 +329,16 @@ Type any natural language question about NUST data into the chat box and press *
 **Example questions:**
 
 ```
-How many students are currently active?
+How many students are currently enrolled?
 List all programs offered by SEECS.
-Which students have a CGPA above 3.5?
+Which applicants have a best test score above 150?
 How many applications are pending for the Computer Science program?
-What courses does the Software Engineering program require in semester 3?
-Which instructors teach in the SMME school?
-How much total fee has been collected for tuition payments?
+What core courses does the BSCS program require in semester 1?
+Which faculty members teach in the SMME school?
 List all classrooms with capacity greater than 50.
-Which students are enrolled in CS101 this term?
+Which students are enrolled in CS220 this term?
 What is the average entry test score for applicants to NBS programs?
+List all offers that are still awaiting acceptance.
 ```
 
 Click the **reasoning steps** toggle (▶) under any response to see exactly how the agent generated and validated the SQL query.
@@ -404,12 +402,11 @@ test-sql-rag/
 ├── .env                            # Environment variables (not committed to git)
 │
 ├── db/
-│   ├── NUST.sql                    # Complete schema + seed data (15 tables)
+│   ├── NUST.sql                    # Complete schema + seed data (16 tables)
 │   └── ERD.mmd                     # Entity-relationship diagram (Mermaid)
 │
 ├── examples/
-│   ├── examples.json               # 22 few-shot Q&A pairs for FAISS retrieval
-│   └── examples.sql                # Raw SQL examples
+│   └── examples.json               # 22 few-shot Q&A pairs for FAISS retrieval
 │
 ├── prompts/
 │   └── system-prompt-template.txt  # LLM system prompt with schema instructions

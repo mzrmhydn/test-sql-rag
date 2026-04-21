@@ -1,53 +1,66 @@
 -- =============================================================================
 -- NUST University Database - MySQL 8.0+ Schema + Seed Data
 -- =============================================================================
--- A normalized relational schema for NUST spanning:
---   * Admissions : Applicant -> EntryTest -> Application -> ApplicationFee
---   * Academics  : Student   -> Enrollment <- Section -> Course
+-- A relational schema for NUST spanning two connected pipelines:
+--   * Admissions : applicant -> test_attempt/entry_test -> application -> offer
+--   * Academics  : school -> program/course (via program_course) -> section
+--                  -> enrollment <- student
 --
 -- KEY DESIGN DECISIONS
--- 1. Student is 1:1 with an accepted Application. Applicant and Program are
---    reached THROUGH Application (no denormalization on Student).
--- 2. Course is owned by a School, not a Program. Program<->Course is a real
---    M:N relationship captured in the ProgramCourse junction (with Core/Elective
---    and Semester attributes).
--- 3. Unified Fee ledger. A single Fee table tracks both the per-application
---    processing fee (paid by the Applicant via Application) and the per-student
---    tuition/hostel/library fees (paid by the Student). The payer is pinned by
---    FeeType with an XOR CHECK: exactly one of (ApplicationID, StudentID) is
---    non-NULL per row. A UNIQUE index on ApplicationID enforces "at most one
---    Application fee per Application" (MySQL treats multiple NULLs as distinct
---    in UNIQUE indexes, so non-application rows with NULL ApplicationID are
---    unaffected).
--- 4. Enrollment separates Grade (nullable) from Status (InProgress/Completed/
---    Withdrawn) instead of overloading one Grade column with sentinel values.
+-- 1. VARCHAR primary keys are used throughout. Entity IDs are human-readable:
+--    program_id = program code ('BSCS'), course_code itself is the PK of
+--    course, school_id = abbreviation ('SEECS'), term_id = compact code
+--    ('FA25' for Fall 2025), etc. This makes joins and seed data readable
+--    without surrogate lookup tables.
+-- 2. Student carries a DIRECT FK to both program (program_id) and applicant
+--    (applicant_id) — a deliberate denormalization over reaching these
+--    through application. See Phase2_Normalization_Analysis.md §2 for the
+--    trade-off (query ergonomics vs BCNF purity). UNIQUE(applicant_id) on
+--    student enforces the 1:1 applicant-becomes-student cardinality.
+-- 3. Course is owned by a school, not a program. Program<->Course is a real
+--    M:N relationship captured in the program_course junction (with is_core
+--    and recommended_semester on the junction).
+-- 4. Prerequisites are modelled as a self-referential junction (prerequisite)
+--    so a course can have many prereqs and be a prereq of many others.
+-- 5. The offer entity separates the act of ISSUING an admission offer from
+--    the application itself: an offer has its own issue_date / expiry_date
+--    and a status lifecycle (Issued -> Accepted / Declined / Expired).
+-- 6. Enrollment is keyed by the composite (student_id, section_id); grade is
+--    an ENUM that is NULL while the section is still in progress or if a
+--    grade has not yet been reported. attendance_percentage is a live metric.
 -- =============================================================================
+
+DROP DATABASE IF EXISTS nust_university;
+CREATE DATABASE nust_university
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_0900_ai_ci;
+USE nust_university;
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
-DROP PROCEDURE IF EXISTS GenerateTuitionChallan;
-DROP PROCEDURE IF EXISTS AcceptAdmission;
-DROP FUNCTION  IF EXISTS IsEligibleForEngineering;
-DROP TRIGGER   IF EXISTS AutoUpdateApplicationStatus;
-DROP TRIGGER   IF EXISTS EnforceClassCapacity;
-DROP VIEW      IF EXISTS ClassroomUtilization;
-DROP VIEW      IF EXISTS StudentTranscript;
-DROP TABLE IF EXISTS Enrollment;
-DROP TABLE IF EXISTS Section;
-DROP TABLE IF EXISTS Classroom;
-DROP TABLE IF EXISTS Term;
-DROP TABLE IF EXISTS ProgramCourse;
-DROP TABLE IF EXISTS Course;
-DROP TABLE IF EXISTS Instructor;
-DROP TABLE IF EXISTS Fee;
-DROP TABLE IF EXISTS Student;
-DROP TABLE IF EXISTS Application;
-DROP TABLE IF EXISTS TestScore;
-DROP TABLE IF EXISTS EntryTest;
-DROP TABLE IF EXISTS Applicant;
-DROP TABLE IF EXISTS Program;
-DROP TABLE IF EXISTS School;
+DROP PROCEDURE IF EXISTS accept_admission;
+DROP FUNCTION  IF EXISTS is_eligible_for_engineering;
+DROP TRIGGER   IF EXISTS auto_update_application_status;
+DROP TRIGGER   IF EXISTS enforce_class_capacity;
+DROP VIEW      IF EXISTS classroom_utilization;
+DROP VIEW      IF EXISTS student_transcript;
+DROP TABLE IF EXISTS enrollment;
+DROP TABLE IF EXISTS section;
+DROP TABLE IF EXISTS offer;
+DROP TABLE IF EXISTS student;
+DROP TABLE IF EXISTS application;
+DROP TABLE IF EXISTS test_attempt;
+DROP TABLE IF EXISTS entry_test;
+DROP TABLE IF EXISTS applicant;
+DROP TABLE IF EXISTS prerequisite;
+DROP TABLE IF EXISTS program_course;
+DROP TABLE IF EXISTS course;
+DROP TABLE IF EXISTS classroom;
+DROP TABLE IF EXISTS term;
+DROP TABLE IF EXISTS program;
+DROP TABLE IF EXISTS faculty;
+DROP TABLE IF EXISTS school;
 
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -55,238 +68,218 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- ADMINISTRATIVE STRUCTURE
 -- =============================================================================
 
-CREATE TABLE School (
-    SchoolID        INT          NOT NULL AUTO_INCREMENT,
-    Name            VARCHAR(100) NOT NULL,
-    Location        VARCHAR(100),
-    EstablishedYear INT,
-    PRIMARY KEY (SchoolID),
-    UNIQUE KEY UQ_School_Name (Name)
+CREATE TABLE school (
+    school_id         VARCHAR(10)  NOT NULL,
+    school_name       VARCHAR(150) NOT NULL,
+    abbreviation      VARCHAR(20)  NOT NULL,
+    established_year  SMALLINT,
+    PRIMARY KEY (school_id),
+    UNIQUE KEY uq_school_name         (school_name),
+    UNIQUE KEY uq_school_abbreviation (abbreviation)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- School 1 -> M Program (mandatory: every program belongs to exactly one school)
-CREATE TABLE Program (
-    ProgramID     INT         NOT NULL AUTO_INCREMENT,
-    SchoolID      INT         NOT NULL,
-    ProgramName   VARCHAR(100) NOT NULL,
-    DegreeType    VARCHAR(20)  NOT NULL,
-    DurationYears INT          DEFAULT 4,
-    TotalSeats    INT,
-    PRIMARY KEY (ProgramID),
-    UNIQUE KEY UQ_Program_School_Name (SchoolID, ProgramName),
-    CONSTRAINT CHK_Program_Duration CHECK (DurationYears BETWEEN 1 AND 7),
-    CONSTRAINT CHK_Program_Seats    CHECK (TotalSeats > 0),
-    FOREIGN KEY (SchoolID) REFERENCES School(SchoolID) ON DELETE CASCADE
+CREATE TABLE faculty (
+    faculty_id   VARCHAR(10)  NOT NULL,
+    school_id    VARCHAR(10)  NOT NULL,
+    full_name    VARCHAR(100) NOT NULL,
+    email        VARCHAR(100) NOT NULL,
+    designation  ENUM('Lecturer','Assistant Professor','Associate Professor','Professor') NOT NULL,
+    PRIMARY KEY (faculty_id),
+    UNIQUE KEY uq_faculty_email (email),
+    FOREIGN KEY (school_id) REFERENCES school(school_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE program (
+    program_id       VARCHAR(15)  NOT NULL,
+    school_id        VARCHAR(10)  NOT NULL,
+    program_name     VARCHAR(100) NOT NULL,
+    degree_type      ENUM('BS','BE','BBA','BArch','MS','PhD') NOT NULL,
+    total_semesters  TINYINT      NOT NULL,
+    total_credits    SMALLINT     NOT NULL,
+    total_seats      SMALLINT     NOT NULL,
+    PRIMARY KEY (program_id),
+    UNIQUE KEY uq_program_school_name (school_id, program_name),
+    CONSTRAINT chk_program_semesters CHECK (total_semesters BETWEEN 2 AND 14),
+    CONSTRAINT chk_program_credits   CHECK (total_credits   > 0),
+    CONSTRAINT chk_program_seats     CHECK (total_seats     > 0),
+    FOREIGN KEY (school_id) REFERENCES school(school_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =============================================================================
+-- COURSE CATALOGUE AND CURRICULUM
+-- =============================================================================
+
+CREATE TABLE course (
+    course_code    VARCHAR(15)  NOT NULL,
+    school_id      VARCHAR(10)  NOT NULL,
+    course_title   VARCHAR(100) NOT NULL,
+    course_type    ENUM('Theory','Lab','Theory+Lab','Studio','Seminar') NOT NULL DEFAULT 'Theory',
+    credit_hours   TINYINT      NOT NULL,
+    contact_hours  TINYINT      NOT NULL,
+    PRIMARY KEY (course_code),
+    CONSTRAINT chk_course_credit_hours  CHECK (credit_hours  BETWEEN 0 AND 6),
+    CONSTRAINT chk_course_contact_hours CHECK (contact_hours BETWEEN 0 AND 10),
+    FOREIGN KEY (school_id) REFERENCES school(school_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Self-referential M:N on course (a course has many prereqs, and may itself
+-- be a prereq of many other courses).
+CREATE TABLE prerequisite (
+    course_code         VARCHAR(15) NOT NULL,
+    prereq_course_code  VARCHAR(15) NOT NULL,
+    PRIMARY KEY (course_code, prereq_course_code),
+    CONSTRAINT chk_prereq_not_self CHECK (course_code <> prereq_course_code),
+    FOREIGN KEY (course_code)        REFERENCES course(course_code) ON DELETE CASCADE,
+    FOREIGN KEY (prereq_course_code) REFERENCES course(course_code) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Junction (with attrs): program M <-> M course
+CREATE TABLE program_course (
+    program_id            VARCHAR(15) NOT NULL,
+    course_code           VARCHAR(15) NOT NULL,
+    recommended_semester  TINYINT     NOT NULL,
+    is_core               BOOLEAN     NOT NULL DEFAULT TRUE,
+    PRIMARY KEY (program_id, course_code),
+    CONSTRAINT chk_pc_semester CHECK (recommended_semester BETWEEN 1 AND 14),
+    FOREIGN KEY (program_id)  REFERENCES program(program_id)  ON DELETE CASCADE,
+    FOREIGN KEY (course_code) REFERENCES course(course_code) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE term (
+    term_id        VARCHAR(15) NOT NULL,
+    term_name      ENUM('Fall','Spring','Summer') NOT NULL,
+    academic_year  SMALLINT    NOT NULL,
+    start_date     DATE        NOT NULL,
+    end_date       DATE        NOT NULL,
+    PRIMARY KEY (term_id),
+    UNIQUE KEY uq_term_name_year (term_name, academic_year),
+    CONSTRAINT chk_term_dates CHECK (end_date > start_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE classroom (
+    classroom_id  VARCHAR(15) NOT NULL,
+    building      VARCHAR(50) NOT NULL,
+    room_number   VARCHAR(20) NOT NULL,
+    capacity      SMALLINT    NOT NULL,
+    PRIMARY KEY (classroom_id),
+    UNIQUE KEY uq_classroom_building_room (building, room_number),
+    CONSTRAINT chk_classroom_capacity CHECK (capacity > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =============================================================================
 -- ADMISSIONS PIPELINE
 -- =============================================================================
 
-CREATE TABLE Applicant (
-    ApplicantID     INT          NOT NULL AUTO_INCREMENT,
-    FirstName       VARCHAR(50)  NOT NULL,
-    LastName        VARCHAR(50)  NOT NULL,
-    Email           VARCHAR(100) NOT NULL,
-    Phone           VARCHAR(20),
-    DOB             DATE,
-    HighSchoolMarks INT,
-    City            VARCHAR(50),
-    PRIMARY KEY (ApplicantID),
-    UNIQUE KEY UQ_Applicant_Email (Email),
-    CONSTRAINT CHK_Applicant_Marks CHECK (HighSchoolMarks BETWEEN 0 AND 1100)
+CREATE TABLE applicant (
+    applicant_id       VARCHAR(15)  NOT NULL,
+    full_name          VARCHAR(100) NOT NULL,
+    cnic               VARCHAR(20)  NOT NULL,
+    email              VARCHAR(100) NOT NULL,
+    high_school_board  ENUM('FBISE','AKU-EB','Cambridge','Other') NOT NULL,
+    high_school_score  DECIMAL(6,2) NOT NULL,
+    best_test_score    DECIMAL(5,2),
+    PRIMARY KEY (applicant_id),
+    UNIQUE KEY uq_applicant_cnic  (cnic),
+    UNIQUE KEY uq_applicant_email (email),
+    CONSTRAINT chk_applicant_hs_score   CHECK (high_school_score BETWEEN 0 AND 1100),
+    CONSTRAINT chk_applicant_test_score CHECK (best_test_score IS NULL OR best_test_score BETWEEN 0 AND 200)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE EntryTest (
-    TestID     INT         NOT NULL AUTO_INCREMENT,
-    SeriesName VARCHAR(80) NOT NULL,
-    TestDate   DATE        NOT NULL,
-    TestType   VARCHAR(30) NOT NULL,
-    PRIMARY KEY (TestID),
-    UNIQUE KEY UQ_EntryTest_Series (SeriesName),
-    CONSTRAINT CHK_EntryTest_Type CHECK (TestType IN ('Engineering','Business','Architecture','Biosciences','Chemical'))
+CREATE TABLE entry_test (
+    test_id      VARCHAR(15) NOT NULL,
+    test_type    ENUM('Engineering','Business','Architecture','Biosciences','Chemical') NOT NULL,
+    test_date    DATE        NOT NULL,
+    total_marks  SMALLINT    NOT NULL,
+    PRIMARY KEY (test_id),
+    CONSTRAINT chk_test_total_marks CHECK (total_marks > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Junction: Applicant M <-> M EntryTest
-CREATE TABLE TestScore (
-    TestScoreID INT NOT NULL AUTO_INCREMENT,
-    ApplicantID INT NOT NULL,
-    TestID      INT NOT NULL,
-    Score       INT NOT NULL,
-    PRIMARY KEY (TestScoreID),
-    UNIQUE KEY UQ_TestScore_Applicant_Test (ApplicantID, TestID),
-    CONSTRAINT CHK_TestScore_Score CHECK (Score BETWEEN 0 AND 200),
-    FOREIGN KEY (ApplicantID) REFERENCES Applicant(ApplicantID) ON DELETE CASCADE,
-    FOREIGN KEY (TestID)      REFERENCES EntryTest(TestID)      ON DELETE CASCADE
+-- Junction: applicant M <-> M entry_test (an applicant takes each test at most once)
+CREATE TABLE test_attempt (
+    applicant_id  VARCHAR(15)  NOT NULL,
+    test_id       VARCHAR(15)  NOT NULL,
+    score         DECIMAL(5,2) NOT NULL,
+    PRIMARY KEY (applicant_id, test_id),
+    CONSTRAINT chk_attempt_score CHECK (score >= 0),
+    FOREIGN KEY (applicant_id) REFERENCES applicant(applicant_id) ON DELETE CASCADE,
+    FOREIGN KEY (test_id)      REFERENCES entry_test(test_id)     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Junction (with attrs): Applicant M <-> M Program
-CREATE TABLE Application (
-    ApplicationID   INT         NOT NULL AUTO_INCREMENT,
-    ApplicantID     INT         NOT NULL,
-    ProgramID       INT         NOT NULL,
-    ApplicationDate DATE        NOT NULL,
-    Preference      INT         DEFAULT 1,
-    Status          VARCHAR(20) DEFAULT 'Pending',
-    PRIMARY KEY (ApplicationID),
-    UNIQUE KEY UQ_Application_Applicant_Program (ApplicantID, ProgramID),
-    CONSTRAINT CHK_Application_Preference CHECK (Preference BETWEEN 1 AND 5),
-    CONSTRAINT CHK_Application_Status     CHECK (Status IN ('Pending','Selected','Waitlisted','Rejected','Enrolled','Declined')),
-    FOREIGN KEY (ApplicantID) REFERENCES Applicant(ApplicantID) ON DELETE CASCADE,
-    FOREIGN KEY (ProgramID)   REFERENCES Program(ProgramID)     ON DELETE CASCADE
+-- Junction (with attrs): applicant M <-> M program, scoped by term.
+CREATE TABLE application (
+    application_id      VARCHAR(15)  NOT NULL,
+    applicant_id        VARCHAR(15)  NOT NULL,
+    program_id          VARCHAR(15)  NOT NULL,
+    term_id             VARCHAR(15)  NOT NULL,
+    snapshot_hs_score   DECIMAL(6,2) NOT NULL,
+    snapshot_best_test  DECIMAL(5,2),
+    aggregate_score     DECIMAL(5,2),
+    submission_date     DATE         NOT NULL,
+    status              ENUM('Pending','Selected','Waitlisted','Rejected','Enrolled','Declined') NOT NULL DEFAULT 'Pending',
+    PRIMARY KEY (application_id),
+    UNIQUE KEY uq_application_applicant_program_term (applicant_id, program_id, term_id),
+    FOREIGN KEY (applicant_id) REFERENCES applicant(applicant_id) ON DELETE CASCADE,
+    FOREIGN KEY (program_id)   REFERENCES program(program_id)     ON DELETE CASCADE,
+    FOREIGN KEY (term_id)      REFERENCES term(term_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Application 1 <-> 0..1 Student
--- The Student row exists only for the ONE accepted Application of an applicant.
--- Applicant and Program are derived through Application (no denormalization).
-CREATE TABLE Student (
-    StudentID      INT         NOT NULL AUTO_INCREMENT,
-    ApplicationID  INT         NOT NULL,
-    EnrollmentDate DATE        NOT NULL,
-    CGPA           DECIMAL(4,2) DEFAULT 0.00,
-    Status         VARCHAR(20)  DEFAULT 'Active',
-    PRIMARY KEY (StudentID),
-    UNIQUE KEY UQ_Student_Application (ApplicationID),
-    CONSTRAINT CHK_Student_CGPA   CHECK (CGPA BETWEEN 0.00 AND 4.00),
-    CONSTRAINT CHK_Student_Status CHECK (Status IN ('Active','Graduated','Suspended','Withdrawn')),
-    FOREIGN KEY (ApplicationID) REFERENCES Application(ApplicationID)
+-- application 1 <-> 0..1 offer (at most one offer per application)
+CREATE TABLE offer (
+    offer_id        VARCHAR(15) NOT NULL,
+    application_id  VARCHAR(15) NOT NULL,
+    issue_date      DATE        NOT NULL,
+    expiry_date     DATE        NOT NULL,
+    status          ENUM('Issued','Accepted','Declined','Expired') NOT NULL DEFAULT 'Issued',
+    PRIMARY KEY (offer_id),
+    UNIQUE KEY uq_offer_application (application_id),
+    CONSTRAINT chk_offer_dates CHECK (expiry_date > issue_date),
+    FOREIGN KEY (application_id) REFERENCES application(application_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Unified Fee ledger
---   FeeType = 'Application' : paid by the applicant, keyed to Application
---                             (at most one such row per Application)
---   FeeType IN ('Tuition','Hostel','Library') : paid by the student,
---                             keyed to Student (many rows per Student)
--- The XOR CHECK guarantees exactly one payer FK is set per row.
--- The UNIQUE KEY on ApplicationID enforces "at most one Application-type fee
--- per Application"; MySQL allows multiple NULLs in a UNIQUE index, so student-
--- fee rows (ApplicationID IS NULL) are unaffected.
-CREATE TABLE Fee (
-    FeeID         INT           NOT NULL AUTO_INCREMENT,
-    ApplicationID INT,
-    StudentID     INT,
-    FeeType       VARCHAR(20)   NOT NULL,
-    Amount        DECIMAL(10,2) NOT NULL,
-    PaymentDate   DATE          NOT NULL,
-    Method        VARCHAR(20)   NOT NULL,
-    PRIMARY KEY (FeeID),
-    UNIQUE KEY IDX_Fee_OneAppFeePerApp (ApplicationID),
-    CONSTRAINT CHK_Fee_Type   CHECK (FeeType IN ('Application','Tuition','Hostel','Library')),
-    CONSTRAINT CHK_Fee_Amount CHECK (Amount >= 0),
-    CONSTRAINT CHK_Fee_Method CHECK (Method IN ('Bank','Online','Cheque','Cash')),
-    CONSTRAINT CHK_Fee_Payer  CHECK (
-        (FeeType = 'Application'
-            AND ApplicationID IS NOT NULL AND StudentID IS NULL)
-     OR (FeeType IN ('Tuition','Hostel','Library')
-            AND StudentID IS NOT NULL AND ApplicationID IS NULL)
-    ),
-    FOREIGN KEY (ApplicationID) REFERENCES Application(ApplicationID) ON DELETE CASCADE,
-    FOREIGN KEY (StudentID)     REFERENCES Student(StudentID)         ON DELETE CASCADE
+-- applicant 1 <-> 0..1 student; every student is also linked to their program.
+CREATE TABLE student (
+    student_id        VARCHAR(15)  NOT NULL,
+    program_id        VARCHAR(15)  NOT NULL,
+    applicant_id      VARCHAR(15)  NOT NULL,
+    full_name         VARCHAR(100) NOT NULL,
+    email             VARCHAR(100) NOT NULL,
+    current_semester  TINYINT      NOT NULL DEFAULT 1,
+    enrollment_date   DATE         NOT NULL,
+    PRIMARY KEY (student_id),
+    UNIQUE KEY uq_student_applicant (applicant_id),
+    UNIQUE KEY uq_student_email     (email),
+    CONSTRAINT chk_student_semester CHECK (current_semester BETWEEN 1 AND 14),
+    FOREIGN KEY (program_id)   REFERENCES program(program_id),
+    FOREIGN KEY (applicant_id) REFERENCES applicant(applicant_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- =============================================================================
--- ACADEMIC PIPELINE
--- =============================================================================
-
-CREATE TABLE Instructor (
-    InstructorID INT          NOT NULL AUTO_INCREMENT,
-    SchoolID     INT          NOT NULL,
-    FirstName    VARCHAR(50)  NOT NULL,
-    LastName     VARCHAR(50)  NOT NULL,
-    Title        VARCHAR(50)  NOT NULL,
-    Email        VARCHAR(100),
-    HireDate     DATE,
-    PRIMARY KEY (InstructorID),
-    UNIQUE KEY UQ_Instructor_Email (Email),
-    CONSTRAINT CHK_Instructor_Title CHECK (Title IN ('Lecturer','Assistant Professor','Associate Professor','Professor')),
-    FOREIGN KEY (SchoolID) REFERENCES School(SchoolID)
+-- A scheduled offering of a course, in a term, taught by a faculty member, in
+-- a classroom. All four links are mandatory.
+CREATE TABLE section (
+    section_id     VARCHAR(20) NOT NULL,
+    course_code    VARCHAR(15) NOT NULL,
+    term_id        VARCHAR(15) NOT NULL,
+    classroom_id   VARCHAR(15) NOT NULL,
+    faculty_id     VARCHAR(10) NOT NULL,
+    section_label  VARCHAR(5)  NOT NULL,
+    PRIMARY KEY (section_id),
+    UNIQUE KEY uq_section_course_term_label (course_code, term_id, section_label),
+    FOREIGN KEY (course_code)  REFERENCES course(course_code),
+    FOREIGN KEY (term_id)      REFERENCES term(term_id),
+    FOREIGN KEY (classroom_id) REFERENCES classroom(classroom_id),
+    FOREIGN KEY (faculty_id)   REFERENCES faculty(faculty_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Course is owned by a School (a teaching unit), NOT a Program.
--- This enables multiple programs to share the same course.
-CREATE TABLE Course (
-    CourseID   INT          NOT NULL AUTO_INCREMENT,
-    SchoolID   INT          NOT NULL,
-    CourseCode VARCHAR(10)  NOT NULL,
-    CourseName VARCHAR(100) NOT NULL,
-    Credits    INT          NOT NULL,
-    PRIMARY KEY (CourseID),
-    UNIQUE KEY UQ_Course_Code (CourseCode),
-    CONSTRAINT CHK_Course_Credits CHECK (Credits BETWEEN 1 AND 6),
-    FOREIGN KEY (SchoolID) REFERENCES School(SchoolID)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Junction: Program M <-> M Course
-CREATE TABLE ProgramCourse (
-    ProgramID  INT         NOT NULL,
-    CourseID   INT         NOT NULL,
-    CourseType VARCHAR(10) NOT NULL DEFAULT 'Core',
-    Semester   INT         NOT NULL,
-    PRIMARY KEY (ProgramID, CourseID),
-    CONSTRAINT CHK_ProgramCourse_Type     CHECK (CourseType IN ('Core','Elective')),
-    CONSTRAINT CHK_ProgramCourse_Semester CHECK (Semester BETWEEN 1 AND 10),
-    FOREIGN KEY (ProgramID) REFERENCES Program(ProgramID) ON DELETE CASCADE,
-    FOREIGN KEY (CourseID)  REFERENCES Course(CourseID)   ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE Term (
-    TermID    INT         NOT NULL AUTO_INCREMENT,
-    TermName  VARCHAR(50) NOT NULL,
-    StartDate DATE        NOT NULL,
-    EndDate   DATE        NOT NULL,
-    PRIMARY KEY (TermID),
-    UNIQUE KEY UQ_Term_Name (TermName),
-    CONSTRAINT CHK_Term_Dates CHECK (EndDate > StartDate)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE Classroom (
-    ClassroomID INT         NOT NULL AUTO_INCREMENT,
-    SchoolID    INT         NOT NULL,
-    RoomNumber  VARCHAR(20) NOT NULL,
-    Capacity    INT         NOT NULL,
-    RoomType    VARCHAR(20) NOT NULL,
-    PRIMARY KEY (ClassroomID),
-    UNIQUE KEY UQ_Classroom_School_Room (SchoolID, RoomNumber),
-    CONSTRAINT CHK_Classroom_Capacity CHECK (Capacity > 0),
-    CONSTRAINT CHK_Classroom_RoomType CHECK (RoomType IN ('Lecture','Lab','Studio','Hall')),
-    FOREIGN KEY (SchoolID) REFERENCES School(SchoolID)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- A Section is a scheduled offering of a Course, in a Term, taught by an
--- Instructor, in a Classroom. All four links are mandatory.
-CREATE TABLE Section (
-    SectionID    INT         NOT NULL AUTO_INCREMENT,
-    CourseID     INT         NOT NULL,
-    TermID       INT         NOT NULL,
-    InstructorID INT         NOT NULL,
-    ClassroomID  INT         NOT NULL,
-    SectionName  VARCHAR(10) NOT NULL,
-    PRIMARY KEY (SectionID),
-    UNIQUE KEY UQ_Section_Course_Term_Name (CourseID, TermID, SectionName),
-    FOREIGN KEY (CourseID)     REFERENCES Course(CourseID),
-    FOREIGN KEY (TermID)       REFERENCES Term(TermID),
-    FOREIGN KEY (InstructorID) REFERENCES Instructor(InstructorID),
-    FOREIGN KEY (ClassroomID)  REFERENCES Classroom(ClassroomID)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Junction: Student M <-> M Section
-CREATE TABLE Enrollment (
-    EnrollmentID INT         NOT NULL AUTO_INCREMENT,
-    StudentID    INT         NOT NULL,
-    SectionID    INT         NOT NULL,
-    Grade        VARCHAR(2),
-    Status       VARCHAR(15) NOT NULL DEFAULT 'InProgress',
-    PRIMARY KEY (EnrollmentID),
-    UNIQUE KEY UQ_Enrollment_Student_Section (StudentID, SectionID),
-    CONSTRAINT CHK_Enrollment_Grade  CHECK (Grade IS NULL OR
-               Grade IN ('A','A-','B+','B','B-','C+','C','C-','D+','D','F')),
-    CONSTRAINT CHK_Enrollment_Status CHECK (Status IN ('InProgress','Completed','Withdrawn')),
-    CONSTRAINT CHK_Enrollment_GradeStatus CHECK (
-        (Status = 'Completed'                    AND Grade IS NOT NULL)
-     OR (Status IN ('InProgress','Withdrawn')    AND Grade IS NULL)
-    ),
-    FOREIGN KEY (StudentID) REFERENCES Student(StudentID),
-    FOREIGN KEY (SectionID) REFERENCES Section(SectionID)
+-- Junction: student M <-> M section. Grade is NULL while in progress.
+CREATE TABLE enrollment (
+    student_id             VARCHAR(15)  NOT NULL,
+    section_id             VARCHAR(20)  NOT NULL,
+    attendance_percentage  DECIMAL(5,2),
+    grade                  ENUM('A','A-','B+','B','B-','C+','C','C-','D+','D','F'),
+    PRIMARY KEY (student_id, section_id),
+    CONSTRAINT chk_enrollment_attendance CHECK (attendance_percentage IS NULL OR attendance_percentage BETWEEN 0 AND 100),
+    FOREIGN KEY (student_id) REFERENCES student(student_id),
+    FOREIGN KEY (section_id) REFERENCES section(section_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =============================================================================
@@ -296,39 +289,47 @@ CREATE TABLE Enrollment (
 DELIMITER //
 
 -- Reject enrollments that would exceed the hosting classroom's capacity.
-CREATE TRIGGER EnforceClassCapacity
-BEFORE INSERT ON Enrollment
+CREATE TRIGGER enforce_class_capacity
+BEFORE INSERT ON enrollment
 FOR EACH ROW
 BEGIN
     DECLARE v_current_count INT;
-    DECLARE v_capacity       INT;
+    DECLARE v_capacity      INT;
 
     SELECT COUNT(*) INTO v_current_count
-    FROM Enrollment
-    WHERE SectionID = NEW.SectionID;
+      FROM enrollment
+     WHERE section_id = NEW.section_id;
 
-    SELECT c.Capacity INTO v_capacity
-    FROM Classroom c
-    JOIN Section   s ON s.ClassroomID = c.ClassroomID
-    WHERE s.SectionID = NEW.SectionID;
+    SELECT c.capacity INTO v_capacity
+      FROM classroom c
+      JOIN section   s ON s.classroom_id = c.classroom_id
+     WHERE s.section_id = NEW.section_id;
 
     IF v_current_count >= v_capacity THEN
         SIGNAL SQLSTATE '45000'
-            SET MESSAGE_TEXT = 'Enrollment failed: Classroom capacity reached.';
+            SET MESSAGE_TEXT = 'Enrollment failed: classroom capacity reached.';
     END IF;
 END //
 
--- When a Student is created, promote the corresponding accepted Application
--- from 'Selected' to 'Enrolled'. Sibling applications of the same applicant
--- are untouched.
-CREATE TRIGGER AutoUpdateApplicationStatus
-AFTER INSERT ON Student
+-- When a student is inserted, promote their matching Selected application to
+-- 'Enrolled' and flip the associated offer from 'Issued' to 'Accepted'. The
+-- student is linked to the application through (applicant_id, program_id).
+CREATE TRIGGER auto_update_application_status
+AFTER INSERT ON student
 FOR EACH ROW
 BEGIN
-    UPDATE Application
-       SET Status = 'Enrolled'
-     WHERE ApplicationID = NEW.ApplicationID
-       AND Status        = 'Selected';
+    UPDATE application
+       SET status = 'Enrolled'
+     WHERE applicant_id = NEW.applicant_id
+       AND program_id   = NEW.program_id
+       AND status       = 'Selected';
+
+    UPDATE offer o
+      JOIN application a ON a.application_id = o.application_id
+       SET o.status = 'Accepted'
+     WHERE a.applicant_id = NEW.applicant_id
+       AND a.program_id   = NEW.program_id
+       AND o.status       = 'Issued';
 END //
 
 DELIMITER ;
@@ -337,380 +338,377 @@ DELIMITER ;
 -- INDEXES
 -- =============================================================================
 
-CREATE INDEX IDX_Enrollment_Student   ON Enrollment(StudentID);
-CREATE INDEX IDX_Section_Course       ON Section(CourseID);
-CREATE INDEX IDX_Section_Term         ON Section(TermID);
-CREATE INDEX IDX_Section_Instructor   ON Section(InstructorID);
-CREATE INDEX IDX_Application_Status   ON Application(Status);
-CREATE INDEX IDX_Application_Program  ON Application(ProgramID);
-CREATE INDEX IDX_TestScore_Test       ON TestScore(TestID);
-CREATE INDEX IDX_Course_School        ON Course(SchoolID);
-CREATE INDEX IDX_ProgramCourse_Course ON ProgramCourse(CourseID);
-CREATE INDEX IDX_Fee_Student          ON Fee(StudentID);
-CREATE INDEX IDX_Fee_Type             ON Fee(FeeType);
+CREATE INDEX idx_faculty_school         ON faculty(school_id);
+CREATE INDEX idx_program_school         ON program(school_id);
+CREATE INDEX idx_course_school          ON course(school_id);
+CREATE INDEX idx_program_course_course  ON program_course(course_code);
+CREATE INDEX idx_prerequisite_prereq    ON prerequisite(prereq_course_code);
+CREATE INDEX idx_application_status     ON application(status);
+CREATE INDEX idx_application_program    ON application(program_id);
+CREATE INDEX idx_application_term       ON application(term_id);
+CREATE INDEX idx_test_attempt_test      ON test_attempt(test_id);
+CREATE INDEX idx_offer_status           ON offer(status);
+CREATE INDEX idx_student_program        ON student(program_id);
+CREATE INDEX idx_section_course         ON section(course_code);
+CREATE INDEX idx_section_term           ON section(term_id);
+CREATE INDEX idx_section_classroom      ON section(classroom_id);
+CREATE INDEX idx_section_faculty        ON section(faculty_id);
+CREATE INDEX idx_enrollment_section     ON enrollment(section_id);
 
 -- =============================================================================
 -- SEED DATA
 -- =============================================================================
 
--- 1. School --------------------------------------------------------------------
-INSERT INTO School (Name, Location, EstablishedYear) VALUES
-('SEECS','H-12 Islamabad',2008),   -- 1
-('SMME' ,'H-12 Islamabad',2008),   -- 2
-('NBS'  ,'H-12 Islamabad',2005),   -- 3
-('SADA' ,'H-12 Islamabad',2010),   -- 4
-('NICE' ,'H-12 Islamabad',2006),   -- 5
-('S3H'  ,'H-12 Islamabad',2010),   -- 6
-('ASAB' ,'H-12 Islamabad',2005),   -- 7
-('SCME' ,'H-12 Islamabad',2009),   -- 8
-('CAMP' ,'H-12 Islamabad',2007),   -- 9
-('MCS'  ,'Rawalpindi'    ,2002);   -- 10
+-- 1. school ------------------------------------------------------------------
+INSERT INTO school (school_id, school_name, abbreviation, established_year) VALUES
+('SEECS','School of Electrical Engineering and Computer Science','SEECS',2008),
+('SMME' ,'School of Mechanical and Manufacturing Engineering'   ,'SMME' ,2008),
+('NBS'  ,'NUST Business School'                                 ,'NBS'  ,2005),
+('SADA' ,'School of Art, Design and Architecture'               ,'SADA' ,2010),
+('NICE' ,'NUST Institute of Civil Engineering'                  ,'NICE' ,2006),
+('S3H'  ,'School of Social Sciences and Humanities'             ,'S3H'  ,2010),
+('ASAB' ,'Atta-ur-Rahman School of Applied Biosciences'         ,'ASAB' ,2005),
+('SCME' ,'School of Chemical and Materials Engineering'         ,'SCME' ,2009),
+('CAMP' ,'Centre for Advanced Mathematics and Physics'          ,'CAMP' ,2007),
+('MCS'  ,'Military College of Signals'                          ,'MCS'  ,2002);
 
--- 2. Program -------------------------------------------------------------------
-INSERT INTO Program (SchoolID, ProgramName, DegreeType, DurationYears, TotalSeats) VALUES
-(1,'Software Engineering'    ,'BESE'  ,4,120),  -- 1
-(1,'Computer Science'        ,'BSCS'  ,4,150),  -- 2
-(2,'Mechanical Engineering'  ,'BME'   ,4,100),  -- 3
-(3,'Business Administration' ,'BBA'   ,4,120),  -- 4
-(3,'Accounting and Finance'  ,'BSAF'  ,4, 80),  -- 5
-(5,'Civil Engineering'       ,'BECE'  ,4,100),  -- 6
-(7,'Applied Biosciences'     ,'BSAB'  ,4, 60),  -- 7
-(8,'Chemical Engineering'    ,'BChemE',4, 80),  -- 8
-(4,'Architecture'            ,'BArch' ,5, 50),  -- 9
-(1,'Information Security'    ,'MSIS'  ,2, 40),  -- 10
-(1,'Electrical Engineering'  ,'BEE'   ,4,120),  -- 11
-(2,'Industrial Engineering'  ,'BIME'  ,4, 60);  -- 12
+-- 2. faculty ----------------------------------------------------------------
+INSERT INTO faculty (faculty_id, school_id, full_name, email, designation) VALUES
+('F001','SEECS','Arshad Ali'   ,'arshad.ali@seecs.nust.edu.pk'   ,'Professor'),
+('F002','SEECS','Shamim Baig'  ,'shamim.baig@seecs.nust.edu.pk'  ,'Assistant Professor'),
+('F003','SEECS','Faisal Shafiq','faisal.shafiq@seecs.nust.edu.pk','Associate Professor'),
+('F004','SEECS','Noman Qadir'  ,'noman.qadir@seecs.nust.edu.pk'  ,'Lecturer'),
+('F005','SMME' ,'Rizwan Riaz'  ,'rizwan.riaz@smme.nust.edu.pk'   ,'Professor'),
+('F006','SMME' ,'Ahmad Butt'   ,'ahmad.butt@smme.nust.edu.pk'    ,'Associate Professor'),
+('F007','NBS'  ,'Sarah Khan'   ,'sarah.khan@nbs.nust.edu.pk'     ,'Assistant Professor'),
+('F008','NBS'  ,'Asim Zafar'   ,'asim.zafar@nbs.nust.edu.pk'     ,'Lecturer'),
+('F009','SADA' ,'Hasan Javed'  ,'hasan.javed@sada.nust.edu.pk'   ,'Assistant Professor'),
+('F010','NICE' ,'Tahir Mehmood','tahir.mehmood@nice.nust.edu.pk' ,'Professor'),
+('F011','ASAB' ,'Ayesha Tariq' ,'ayesha.tariq@asab.nust.edu.pk'  ,'Associate Professor'),
+('F012','SCME' ,'Usman Ghadeer','usman.ghadeer@scme.nust.edu.pk' ,'Professor');
 
--- 3. Applicant -----------------------------------------------------------------
-INSERT INTO Applicant (FirstName, LastName, Email, Phone, DOB, HighSchoolMarks, City) VALUES
-('Ali'   ,'Khan'   ,'ali.khan@test.com'     ,'03001234567','2006-04-12', 980,'Islamabad'),   -- 1
-('Aisha' ,'Ahmed'  ,'aisha.ahmed@test.com'  ,'03011234567','2006-09-01',1010,'Lahore'),      -- 2
-('Bilal' ,'Tariq'  ,'bilal.tariq@test.com'  ,'03021234567','2006-11-20', 880,'Karachi'),     -- 3
-('Fatima','Zahra'  ,'fatima.zahra@test.com' ,'03331234567','2006-02-15', 950,'Islamabad'),   -- 4
-('Saad'  ,'Hussain','saad.hussain@test.com' ,'03451234567','2005-06-30', 905,'Peshawar'),    -- 5
-('Omar'  ,'Sheikh' ,'omar.sheikh@test.com'  ,'03111234567','2007-08-08', 850,'Multan'),      -- 6
-('Zainab','Rizvi'  ,'zainab.rizvi@test.com' ,'03441234567','2007-01-25',1020,'Islamabad'),   -- 7
-('Hamza' ,'Farooq' ,'hamza.farooq@test.com' ,'03211234567','2007-03-10', 800,'Faisalabad'),  -- 8
-('Sana'  ,'Iqbal'  ,'sana.iqbal@test.com'   ,'03311234567','2007-07-22', 940,'Rawalpindi'),  -- 9
-('Usman' ,'Ali'    ,'usman.ali@test.com'    ,'03121234567','2007-12-05', 860,'Quetta'),      -- 10
-('Hina'  ,'Malik'  ,'hina.malik@test.com'   ,'03131234567','2007-04-18', 970,'Lahore'),      -- 11
-('Tariq' ,'Mahmood','tariq.mahmood@test.com','03041234567','2007-05-22', 830,'Karachi'),     -- 12
-('Noor'  ,'Fatima' ,'noor.fatima@test.com'  ,'03511234567','2007-10-30', 960,'Islamabad'),   -- 13
-('Ahmed' ,'Raza'   ,'ahmed.raza@test.com'   ,'03061234567','2007-09-14', 790,'Hyderabad'),   -- 14
-('Sara'  ,'Khan'   ,'sara.khan@test.com'    ,'03561234567','2007-06-02', 890,'Lahore');      -- 15
+-- 3. program ----------------------------------------------------------------
+INSERT INTO program (program_id, school_id, program_name, degree_type, total_semesters, total_credits, total_seats) VALUES
+('BSCS'  ,'SEECS','Computer Science'       ,'BS'    , 8,134,150),
+('BESE'  ,'SEECS','Software Engineering'   ,'BE'    , 8,136,120),
+('BEE'   ,'SEECS','Electrical Engineering' ,'BE'    , 8,136,120),
+('MSIS'  ,'SEECS','Information Security'   ,'MS'    , 4, 30, 40),
+('BME'   ,'SMME' ,'Mechanical Engineering' ,'BE'    , 8,136,100),
+('BIME'  ,'SMME' ,'Industrial Engineering' ,'BE'    , 8,136, 60),
+('BBA'   ,'NBS'  ,'Business Administration','BBA'   , 8,132,120),
+('BSAF'  ,'NBS'  ,'Accounting and Finance' ,'BBA'   , 8,132, 80),
+('BECE'  ,'NICE' ,'Civil Engineering'      ,'BE'    , 8,136,100),
+('BArch' ,'SADA' ,'Architecture'           ,'BArch' ,10,160, 50),
+('BSAB'  ,'ASAB' ,'Applied Biosciences'    ,'BS'    , 8,134, 60),
+('BChemE','SCME' ,'Chemical Engineering'   ,'BE'    , 8,136, 80);
 
--- 4. EntryTest -----------------------------------------------------------------
-INSERT INTO EntryTest (SeriesName, TestDate, TestType) VALUES
-('NET-1 (2025 intake)'   ,'2024-12-15','Engineering'),  -- 1
-('NET-2 (2025 intake)'   ,'2025-02-20','Engineering'),  -- 2
-('NET-3 (2025 intake)'   ,'2025-04-10','Engineering'),  -- 3
-('NBS NET (2025 intake)' ,'2025-04-25','Business'),     -- 4
-('NET-1 (2026 intake)'   ,'2025-12-15','Engineering'),  -- 5
-('NET-2 (2026 intake)'   ,'2026-02-20','Engineering'),  -- 6
-('NET-3 (2026 intake)'   ,'2026-04-10','Engineering'),  -- 7
-('NBS NET (2026 intake)' ,'2026-04-25','Business'),     -- 8
-('SADA NET (2026 intake)','2026-05-10','Architecture'), -- 9
-('ASAB NET (2026 intake)','2026-05-20','Biosciences');  -- 10
+-- 4. course -----------------------------------------------------------------
+INSERT INTO course (course_code, school_id, course_title, course_type, credit_hours, contact_hours) VALUES
+('CS118' ,'SEECS','Programming Fundamentals'   ,'Theory+Lab',4,5),
+('CS212' ,'SEECS','Object Oriented Programming','Theory+Lab',4,5),
+('CS220' ,'SEECS','Database Systems'           ,'Theory+Lab',4,5),
+('CS330' ,'SEECS','Operating Systems'          ,'Theory+Lab',3,4),
+('CS440' ,'SEECS','Machine Learning'           ,'Theory+Lab',3,4),
+('SE210' ,'SEECS','Software Requirements Eng'  ,'Theory'    ,3,3),
+('SE310' ,'SEECS','Software Design'            ,'Theory'    ,3,3),
+('ME101' ,'SMME' ,'Engineering Mechanics'      ,'Theory'    ,3,3),
+('ME201' ,'SMME' ,'Thermodynamics'             ,'Theory'    ,3,3),
+('MGT101','NBS'  ,'Principles of Management'   ,'Theory'    ,3,3),
+('FIN201','NBS'  ,'Financial Accounting'       ,'Theory'    ,3,3),
+('CE201' ,'NICE' ,'Circuit Analysis'           ,'Theory+Lab',3,4),
+('AR101' ,'SADA' ,'Architecture Studio I'      ,'Studio'    ,4,8),
+('BS201' ,'ASAB' ,'Microbiology'               ,'Theory+Lab',3,4),
+('CHE201','SCME' ,'Mass Transfer'              ,'Theory'    ,3,3);
 
--- 5. TestScore -----------------------------------------------------------------
-INSERT INTO TestScore (ApplicantID, TestID, Score) VALUES
-( 1, 2,145), ( 1, 3,155),       -- Ali   (2025)
-( 2, 2,162), ( 2, 3,168),       -- Aisha (2025)
-( 3, 1,135), ( 3, 3,140),       -- Bilal (2025)
-( 4, 4,155),                    -- Fatima(2025, Bus)
-( 5, 2,140), ( 5, 3,138),       -- Saad  (2025)
-( 6, 8,125),                    -- Omar  (2026, Bus)
-( 7, 6,172), ( 7, 7,175),       -- Zainab(2026)
-( 8, 7,110),                    -- Hamza (2026)
-( 9, 6,148), ( 9, 7,152),       -- Sana  (2026)
-(10, 6,142), (10, 7,145),       -- Usman (2026)
-(11, 9,160),                    -- Hina  (2026, Arch)
-(12, 6,130), (12, 7,125),       -- Tariq (2026)
-(13,10,155),                    -- Noor  (2026, Bio)
-(14, 7,115),                    -- Ahmed (2026)
-(15, 8,130);                    -- Sara  (2026, Bus)
+-- 5. prerequisite ----------------------------------------------------------
+INSERT INTO prerequisite (course_code, prereq_course_code) VALUES
+('CS212' ,'CS118'),
+('CS220' ,'CS212'),
+('CS330' ,'CS212'),
+('CS440' ,'CS220'),
+('SE310' ,'SE210'),
+('ME201' ,'ME101'),
+('FIN201','MGT101');
 
--- 6. Application (20 rows) -----------------------------------------------------
--- Rows with Status='Selected' will be auto-promoted to 'Enrolled' by the
--- AutoUpdateApplicationStatus trigger once a Student row references them.
-INSERT INTO Application (ApplicantID, ProgramID, ApplicationDate, Preference, Status) VALUES
-( 1, 2,'2025-07-01',1,'Selected'),    -- 1  Ali    -> BSCS
-( 2, 1,'2025-07-01',1,'Selected'),    -- 2  Aisha  -> BESE
-( 2, 2,'2025-07-01',2,'Waitlisted'),  -- 3  Aisha  -> BSCS
-( 3, 3,'2025-07-01',1,'Selected'),    -- 4  Bilal  -> BME
-( 4, 4,'2025-07-02',1,'Selected'),    -- 5  Fatima -> BBA
-( 5, 2,'2025-07-05',1,'Selected'),    -- 6  Saad   -> BSCS
-( 5,11,'2025-07-05',2,'Waitlisted'),  -- 7  Saad   -> BEE
-( 6, 5,'2026-07-01',1,'Selected'),    -- 8  Omar   -> BSAF  (accepted, not yet a Student)
-( 7, 1,'2026-07-01',1,'Selected'),    -- 9  Zainab -> BESE
-( 7, 2,'2026-07-01',2,'Rejected'),    -- 10 Zainab -> BSCS
-( 8, 8,'2026-07-02',1,'Rejected'),    -- 11 Hamza  -> BChemE
-( 9, 2,'2026-07-05',1,'Selected'),    -- 12 Sana   -> BSCS
-( 9, 1,'2026-07-05',2,'Rejected'),    -- 13 Sana   -> BESE
-(10, 6,'2026-07-07',1,'Selected'),    -- 14 Usman  -> BECE
-(11, 9,'2026-07-08',1,'Selected'),    -- 15 Hina   -> BArch
-(11, 7,'2026-07-08',2,'Rejected'),    -- 16 Hina   -> BSAB
-(12, 2,'2026-07-10',1,'Waitlisted'),  -- 17 Tariq  -> BSCS
-(13, 7,'2026-07-12',1,'Selected'),    -- 18 Noor   -> BSAB
-(14, 3,'2026-07-15',1,'Rejected'),    -- 19 Ahmed  -> BME
-(15, 4,'2026-07-18',1,'Selected');    -- 20 Sara   -> BBA   (accepted, not yet a Student)
-
--- 7. Student (10 rows) ---------------------------------------------------------
--- Inserting a Student fires AutoUpdateApplicationStatus, promoting the
--- referenced Application from 'Selected' to 'Enrolled'.
-INSERT INTO Student (ApplicationID, EnrollmentDate, CGPA, Status) VALUES
-( 1,'2025-09-01',3.58,'Active'),  -- S1  Ali    (BSCS, via App 1)
-( 2,'2025-09-01',3.67,'Active'),  -- S2  Aisha  (BESE, via App 2)
-( 4,'2025-09-01',3.50,'Active'),  -- S3  Bilal  (BME,  via App 4)
-( 5,'2025-09-01',4.00,'Active'),  -- S4  Fatima (BBA,  via App 5)
-( 6,'2025-09-01',3.15,'Active'),  -- S5  Saad   (BSCS, via App 6)
-( 9,'2026-09-01',0.00,'Active'),  -- S6  Zainab (BESE, via App 9)
-(12,'2026-09-01',0.00,'Active'),  -- S7  Sana   (BSCS, via App 12)
-(14,'2026-09-01',0.00,'Active'),  -- S8  Usman  (BECE, via App 14)
-(15,'2026-09-01',0.00,'Active'),  -- S9  Hina   (BArch,via App 15)
-(18,'2026-09-01',0.00,'Active');  -- S10 Noor   (BSAB, via App 18)
-
--- 8. Fee (30 rows total)
---    15 Application fees (one per applicant, on their primary application)
---  + 15 Student fees     (10 tuition + 3 hostel + 2 library)
--- All flow through the unified Fee ledger. ApplicationID is set iff the
--- row is the processing fee; StudentID is set iff it is a tuition/hostel/
--- library charge. The XOR CHECK rejects any row that violates this.
-INSERT INTO Fee (ApplicationID, StudentID, FeeType, Amount, PaymentDate, Method) VALUES
--- -- Application processing fees (paid at application time) ------------------
-( 1,  NULL,'Application',4000.00,'2025-05-01','Online'),
-( 2,  NULL,'Application',4000.00,'2025-05-02','Online'),
-( 4,  NULL,'Application',4000.00,'2025-05-05','Bank'),
-( 5,  NULL,'Application',4000.00,'2025-05-10','Online'),
-( 6,  NULL,'Application',4000.00,'2025-05-12','Online'),
-( 8,  NULL,'Application',4000.00,'2026-04-20','Online'),
-( 9,  NULL,'Application',4000.00,'2026-04-22','Bank'),
-(11,  NULL,'Application',4000.00,'2026-04-25','Online'),
-(12,  NULL,'Application',4000.00,'2026-05-01','Cheque'),
-(14,  NULL,'Application',4000.00,'2026-05-03','Online'),
-(15,  NULL,'Application',4000.00,'2026-05-05','Online'),
-(17,  NULL,'Application',4000.00,'2026-05-07','Online'),
-(18,  NULL,'Application',4000.00,'2026-05-10','Bank'),
-(19,  NULL,'Application',4000.00,'2026-05-12','Online'),
-(20,  NULL,'Application',4000.00,'2026-05-14','Online'),
--- -- Tuition for every enrolled student --------------------------------------
-(NULL, 1,'Tuition',150000.00,'2025-08-15','Bank'),
-(NULL, 2,'Tuition',160000.00,'2025-08-16','Bank'),
-(NULL, 3,'Tuition',140000.00,'2025-08-18','Online'),
-(NULL, 4,'Tuition',120000.00,'2025-08-20','Online'),
-(NULL, 5,'Tuition',150000.00,'2025-08-22','Bank'),
-(NULL, 6,'Tuition',160000.00,'2026-08-15','Bank'),
-(NULL, 7,'Tuition',150000.00,'2026-08-16','Online'),
-(NULL, 8,'Tuition',140000.00,'2026-08-18','Bank'),
-(NULL, 9,'Tuition',145000.00,'2026-08-20','Online'),
-(NULL,10,'Tuition',135000.00,'2026-08-22','Online'),
--- -- Hostel fees for non-Islamabad cohort ------------------------------------
-(NULL, 2,'Hostel', 55000.00,'2025-08-25','Bank'),     -- Aisha (Lahore)
-(NULL, 3,'Hostel', 55000.00,'2025-08-26','Online'),   -- Bilal (Karachi)
-(NULL, 9,'Hostel', 55000.00,'2026-08-25','Online'),   -- Hina  (Lahore)
--- -- Library fees ------------------------------------------------------------
-(NULL, 1,'Library',  3000.00,'2025-09-10','Online'),
-(NULL, 4,'Library',  3000.00,'2025-09-12','Cash');
-
--- 9. Instructor ----------------------------------------------------------------
-INSERT INTO Instructor (SchoolID, FirstName, LastName, Title, Email, HireDate) VALUES
-(1,'Arshad','Ali'    ,'Professor'          ,'arshad.ali@seecs.nust.edu.pk'   ,'2010-09-01'),
-(1,'Shamim','Baig'   ,'Assistant Professor','shamim.baig@seecs.nust.edu.pk'  ,'2015-03-15'),
-(1,'Faisal','Shafiq' ,'Associate Professor','faisal.shafiq@seecs.nust.edu.pk','2012-08-20'),
-(1,'Noman' ,'Qadir'  ,'Lecturer'           ,'noman.qadir@seecs.nust.edu.pk'  ,'2019-01-10'),
-(2,'Rizwan','Riaz'   ,'Professor'          ,'rizwan.riaz@smme.nust.edu.pk'   ,'2009-07-01'),
-(2,'Ahmad' ,'Butt'   ,'Associate Professor','ahmad.butt@smme.nust.edu.pk'    ,'2014-09-01'),
-(3,'Sarah' ,'Khan'   ,'Assistant Professor','sarah.khan@nbs.nust.edu.pk'     ,'2017-02-01'),
-(3,'Asim'  ,'Zafar'  ,'Lecturer'           ,'asim.zafar@nbs.nust.edu.pk'     ,'2020-01-15'),
-(4,'Hasan' ,'Javed'  ,'Assistant Professor','hasan.javed@sada.nust.edu.pk'   ,'2016-05-10'),
-(5,'Tahir' ,'Mehmood','Professor'          ,'tahir.mehmood@nice.nust.edu.pk' ,'2008-11-01'),
-(7,'Ayesha','Tariq'  ,'Associate Professor','ayesha.tariq@asab.nust.edu.pk'  ,'2013-04-12'),
-(8,'Usman' ,'Ghadeer','Professor'          ,'usman.ghadeer@scme.nust.edu.pk' ,'2011-06-15');
-
--- 10. Course (15 rows, each owned by a School) --------------------------------
-INSERT INTO Course (SchoolID, CourseCode, CourseName, Credits) VALUES
-(1,'CS118' ,'Programming Fundamentals'   ,4),  -- 1
-(1,'CS212' ,'Object Oriented Programming',4),  -- 2
-(1,'CS220' ,'Database Systems'           ,4),  -- 3
-(1,'CS330' ,'Operating Systems'          ,3),  -- 4
-(1,'CS440' ,'Machine Learning'           ,3),  -- 5
-(1,'SE210' ,'Software Requirements Eng'  ,3),  -- 6
-(1,'SE310' ,'Software Design'            ,3),  -- 7
-(2,'ME101' ,'Engineering Mechanics'      ,3),  -- 8
-(2,'ME201' ,'Thermodynamics'             ,3),  -- 9
-(3,'MGT101','Principles of Management'   ,3),  -- 10
-(3,'FIN201','Financial Accounting'       ,3),  -- 11
-(5,'CE201' ,'Circuit Analysis'           ,3),  -- 12
-(4,'AR101' ,'Architecture Studio I'      ,4),  -- 13
-(7,'BS201' ,'Microbiology'               ,3),  -- 14
-(8,'CHE201','Mass Transfer'              ,3);  -- 15
-
--- 11. ProgramCourse (M:N mapping: a single course appears in many programs) ---
-INSERT INTO ProgramCourse (ProgramID, CourseID, CourseType, Semester) VALUES
--- CS118 Programming Fundamentals: shared across all computing/engineering programs
-( 2, 1,'Core'    ,1),   -- BSCS
-( 1, 1,'Core'    ,1),   -- BESE
-(11, 1,'Core'    ,1),   -- BEE
+-- 6. program_course  (M:N mapping: a course can appear in many programs) ---
+INSERT INTO program_course (program_id, course_code, recommended_semester, is_core) VALUES
+-- CS118 Programming Fundamentals (shared across BSCS/BESE/BEE)
+('BSCS','CS118',1,TRUE),
+('BESE','CS118',1,TRUE),
+('BEE' ,'CS118',1,TRUE),
 -- CS212 OOP
-( 2, 2,'Core'    ,2),   -- BSCS
-( 1, 2,'Core'    ,2),   -- BESE
+('BSCS','CS212',2,TRUE),
+('BESE','CS212',2,TRUE),
 -- CS220 Databases
-( 2, 3,'Core'    ,4),   -- BSCS
-( 1, 3,'Core'    ,3),   -- BESE
--- CS330 OS
-( 2, 4,'Core'    ,5),   -- BSCS
-( 1, 4,'Elective',6),   -- BESE
--- CS440 ML
-( 2, 5,'Elective',7),   -- BSCS
--- SE210 Requirements
-( 1, 6,'Core'    ,3),   -- BESE
-( 2, 6,'Elective',6),   -- BSCS
+('BSCS','CS220',4,TRUE),
+('BESE','CS220',3,TRUE),
+-- CS330 Operating Systems
+('BSCS','CS330',5,TRUE),
+('BESE','CS330',6,FALSE),
+-- CS440 Machine Learning
+('BSCS','CS440',7,FALSE),
+-- SE210 Software Requirements
+('BESE','SE210',3,TRUE),
+('BSCS','SE210',6,FALSE),
 -- SE310 Software Design
-( 1, 7,'Core'    ,5),   -- BESE
--- ME101 Mechanics
-( 3, 8,'Core'    ,1),   -- BME
-(12, 8,'Core'    ,1),   -- BIME
--- ME201 Thermo
-( 3, 9,'Core'    ,3),   -- BME
--- MGT101 Management
-( 4,10,'Core'    ,1),   -- BBA
-( 5,10,'Core'    ,1),   -- BSAF
+('BESE','SE310',5,TRUE),
+-- ME101 Engineering Mechanics
+('BME' ,'ME101',1,TRUE),
+('BIME','ME101',1,TRUE),
+-- ME201 Thermodynamics
+('BME' ,'ME201',3,TRUE),
+-- MGT101 Principles of Management
+('BBA' ,'MGT101',1,TRUE),
+('BSAF','MGT101',1,TRUE),
 -- FIN201 Financial Accounting
-( 5,11,'Core'    ,2),   -- BSAF
-( 4,11,'Core'    ,3),   -- BBA
--- CE201 Circuits
-( 6,12,'Core'    ,2),   -- BECE
-(11,12,'Core'    ,2),   -- BEE
--- AR101 Studio
-( 9,13,'Core'    ,1),   -- BArch
--- BS201 Microbio
-( 7,14,'Core'    ,2),   -- BSAB
+('BSAF','FIN201',2,TRUE),
+('BBA' ,'FIN201',3,TRUE),
+-- CE201 Circuit Analysis
+('BECE','CE201' ,2,TRUE),
+('BEE' ,'CE201' ,2,TRUE),
+-- AR101 Architecture Studio I
+('BArch','AR101',1,TRUE),
+-- BS201 Microbiology
+('BSAB','BS201' ,2,TRUE),
 -- CHE201 Mass Transfer
-( 8,15,'Core'    ,3);   -- BChemE
+('BChemE','CHE201',3,TRUE);
 
--- 12. Term ---------------------------------------------------------------------
-INSERT INTO Term (TermName, StartDate, EndDate) VALUES
-('Fall 2024'  ,'2024-09-01','2025-01-15'),
-('Spring 2025','2025-02-01','2025-06-15'),
-('Summer 2025','2025-07-01','2025-08-15'),
-('Fall 2025'  ,'2025-09-01','2026-01-15'),
-('Spring 2026','2026-02-01','2026-06-15'),
-('Summer 2026','2026-07-01','2026-08-15'),
-('Fall 2026'  ,'2026-09-01','2027-01-15'),
-('Spring 2027','2027-02-01','2027-06-15'),
-('Fall 2027'  ,'2027-09-01','2028-01-15'),
-('Spring 2028','2028-02-01','2028-06-15');
+-- 7. term -------------------------------------------------------------------
+INSERT INTO term (term_id, term_name, academic_year, start_date, end_date) VALUES
+('FA24','Fall'  ,2024,'2024-09-01','2025-01-15'),
+('SP25','Spring',2025,'2025-02-01','2025-06-15'),
+('SU25','Summer',2025,'2025-07-01','2025-08-15'),
+('FA25','Fall'  ,2025,'2025-09-01','2026-01-15'),
+('SP26','Spring',2026,'2026-02-01','2026-06-15'),
+('SU26','Summer',2026,'2026-07-01','2026-08-15'),
+('FA26','Fall'  ,2026,'2026-09-01','2027-01-15'),
+('SP27','Spring',2027,'2027-02-01','2027-06-15'),
+('FA27','Fall'  ,2027,'2027-09-01','2028-01-15'),
+('SP28','Spring',2028,'2028-02-01','2028-06-15');
 
--- 13. Classroom ----------------------------------------------------------------
-INSERT INTO Classroom (SchoolID, RoomNumber, Capacity, RoomType) VALUES
-(1,'CR-01'    ,50,'Lecture'),   -- 1
-(1,'CR-02'    ,50,'Lecture'),   -- 2
-(1,'Lab-A'    ,40,'Lab'),       -- 3
-(1,'Lab-B'    ,40,'Lab'),       -- 4
-(2,'CR-101'   ,60,'Lecture'),   -- 5
-(2,'CR-102'   ,60,'Lecture'),   -- 6
-(3,'Hall-A'  ,100,'Hall'),      -- 7
-(3,'CR-05'    ,40,'Lecture'),   -- 8
-(4,'Studio-1' ,30,'Studio'),    -- 9
-(5,'CR-Civil' ,50,'Lecture'),   -- 10
-(7,'Lab-Bio'  ,35,'Lab'),       -- 11
-(8,'Lab-Chem' ,35,'Lab');       -- 12
+-- 8. classroom -------------------------------------------------------------
+INSERT INTO classroom (classroom_id, building, room_number, capacity) VALUES
+('R01','SEECS Block','CR-01'   , 50),
+('R02','SEECS Block','CR-02'   , 50),
+('R03','SEECS Block','Lab-A'   , 40),
+('R04','SEECS Block','Lab-B'   , 40),
+('R05','SMME Block' ,'CR-101'  , 60),
+('R06','SMME Block' ,'CR-102'  , 60),
+('R07','NBS Block'  ,'Hall-A'  ,100),
+('R08','NBS Block'  ,'CR-05'   , 40),
+('R09','SADA Block' ,'Studio-1', 30),
+('R10','NICE Block' ,'CR-Civil', 50),
+('R11','ASAB Block' ,'Lab-Bio' , 35),
+('R12','SCME Block' ,'Lab-Chem', 35);
 
--- 14. Section ------------------------------------------------------------------
-INSERT INTO Section (CourseID, TermID, InstructorID, ClassroomID, SectionName) VALUES
--- Fall 2025 (Term 4): Cohort 1 intro
-( 1,4, 1, 3,'A'),   -- 1  CS118  Lab-A
-( 1,4, 4, 4,'B'),   -- 2  CS118  Lab-B
-( 6,4, 3, 1,'A'),   -- 3  SE210  CR-01
-( 8,4, 5, 5,'A'),   -- 4  ME101  CR-101
-(10,4, 7, 7,'A'),   -- 5  MGT101 Hall-A
--- Spring 2026 (Term 5): Cohort 1 progression
-( 2,5, 2, 3,'A'),   -- 6  CS212  Lab-A
-( 3,5, 3, 1,'A'),   -- 7  CS220  CR-01
-( 9,5, 6, 5,'A'),   -- 8  ME201  CR-101
-(11,5, 8, 8,'A'),   -- 9  FIN201 CR-05
--- Fall 2026 (Term 7): Cohort 2 intro + Cohort 1 upper-level
-( 1,7, 1, 3,'A'),   -- 10 CS118  Lab-A
-( 1,7, 4, 4,'B'),   -- 11 CS118  Lab-B
-( 6,7, 3, 1,'A'),   -- 12 SE210  CR-01
-(12,7,10,10,'A'),   -- 13 CE201  CR-Civil
-(13,7, 9, 9,'A'),   -- 14 AR101  Studio-1
-(14,7,11,11,'A'),   -- 15 BS201  Lab-Bio
-( 4,7, 2, 1,'A'),   -- 16 CS330  CR-01
-( 5,7, 1, 3,'A');   -- 17 CS440  Lab-A
+-- 9. applicant -------------------------------------------------------------
+INSERT INTO applicant (applicant_id, full_name, cnic, email, high_school_board, high_school_score, best_test_score) VALUES
+('A0001','Ali Khan'     ,'35202-1111111-1','ali.khan@test.com'     ,'FBISE'    , 980.00,155.00),
+('A0002','Aisha Ahmed'  ,'35202-1111112-2','aisha.ahmed@test.com'  ,'FBISE'    ,1010.00,168.00),
+('A0003','Bilal Tariq'  ,'42101-2222223-3','bilal.tariq@test.com'  ,'AKU-EB'   , 880.00,140.00),
+('A0004','Fatima Zahra' ,'35202-3333334-4','fatima.zahra@test.com' ,'FBISE'    , 950.00,155.00),
+('A0005','Saad Hussain' ,'17301-4444445-5','saad.hussain@test.com' ,'FBISE'    , 905.00,140.00),
+('A0006','Omar Sheikh'  ,'36301-5555556-6','omar.sheikh@test.com'  ,'AKU-EB'   , 850.00,125.00),
+('A0007','Zainab Rizvi' ,'35202-6666667-7','zainab.rizvi@test.com' ,'Cambridge',1020.00,175.00),
+('A0008','Hamza Farooq' ,'33100-7777778-8','hamza.farooq@test.com' ,'FBISE'    , 800.00,110.00),
+('A0009','Sana Iqbal'   ,'37405-8888889-9','sana.iqbal@test.com'   ,'FBISE'    , 940.00,152.00),
+('A0010','Usman Ali'    ,'54400-9999991-0','usman.ali@test.com'    ,'FBISE'    , 860.00,145.00),
+('A0011','Hina Malik'   ,'35202-1112223-1','hina.malik@test.com'   ,'Cambridge', 970.00,160.00),
+('A0012','Tariq Mahmood','42101-2223334-2','tariq.mahmood@test.com','AKU-EB'   , 830.00,130.00),
+('A0013','Noor Fatima'  ,'35202-3334445-3','noor.fatima@test.com'  ,'FBISE'    , 960.00,155.00),
+('A0014','Ahmed Raza'   ,'41303-4445556-4','ahmed.raza@test.com'   ,'FBISE'    , 790.00,115.00),
+('A0015','Sara Khan'    ,'35202-5556667-5','sara.khan@test.com'    ,'AKU-EB'   , 890.00,130.00);
 
--- 15. Enrollment (30 rows: history + in-progress) -----------------------------
-INSERT INTO Enrollment (StudentID, SectionID, Grade, Status) VALUES
+-- 10. entry_test ----------------------------------------------------------
+INSERT INTO entry_test (test_id, test_type, test_date, total_marks) VALUES
+('T01','Engineering' ,'2024-12-15',200),  -- NET-1  (2025 intake)
+('T02','Engineering' ,'2025-02-20',200),  -- NET-2  (2025 intake)
+('T03','Engineering' ,'2025-04-10',200),  -- NET-3  (2025 intake)
+('T04','Business'    ,'2025-04-25',200),  -- NBS NET(2025 intake)
+('T05','Engineering' ,'2025-12-15',200),  -- NET-1  (2026 intake)
+('T06','Engineering' ,'2026-02-20',200),  -- NET-2  (2026 intake)
+('T07','Engineering' ,'2026-04-10',200),  -- NET-3  (2026 intake)
+('T08','Business'    ,'2026-04-25',200),  -- NBS NET(2026 intake)
+('T09','Architecture','2026-05-10',200),  -- SADA NET(2026 intake)
+('T10','Biosciences' ,'2026-05-20',200);  -- ASAB NET(2026 intake)
+
+-- 11. test_attempt --------------------------------------------------------
+INSERT INTO test_attempt (applicant_id, test_id, score) VALUES
+('A0001','T02',145.00), ('A0001','T03',155.00),
+('A0002','T02',162.00), ('A0002','T03',168.00),
+('A0003','T01',135.00), ('A0003','T03',140.00),
+('A0004','T04',155.00),
+('A0005','T02',140.00), ('A0005','T03',138.00),
+('A0006','T08',125.00),
+('A0007','T06',172.00), ('A0007','T07',175.00),
+('A0008','T07',110.00),
+('A0009','T06',148.00), ('A0009','T07',152.00),
+('A0010','T06',142.00), ('A0010','T07',145.00),
+('A0011','T09',160.00),
+('A0012','T06',130.00), ('A0012','T07',125.00),
+('A0013','T10',155.00),
+('A0014','T07',115.00),
+('A0015','T08',130.00);
+
+-- 12. application (20 rows) ------------------------------------------------
+-- Rows with status='Selected' will be auto-promoted to 'Enrolled' by the
+-- auto_update_application_status trigger once a matching student is inserted.
+INSERT INTO application (application_id, applicant_id, program_id, term_id, snapshot_hs_score, snapshot_best_test, aggregate_score, submission_date, status) VALUES
+('AP001','A0001','BSCS'  ,'FA25', 980.00,155.00,75.50,'2025-07-01','Selected'),
+('AP002','A0002','BESE'  ,'FA25',1010.00,168.00,83.10,'2025-07-01','Selected'),
+('AP003','A0002','BSCS'  ,'FA25',1010.00,168.00,83.10,'2025-07-01','Waitlisted'),
+('AP004','A0003','BME'   ,'FA25', 880.00,140.00,70.20,'2025-07-01','Selected'),
+('AP005','A0004','BBA'   ,'FA25', 950.00,155.00,74.80,'2025-07-02','Selected'),
+('AP006','A0005','BSCS'  ,'FA25', 905.00,140.00,68.90,'2025-07-05','Selected'),
+('AP007','A0005','BEE'   ,'FA25', 905.00,140.00,68.90,'2025-07-05','Waitlisted'),
+('AP008','A0006','BSAF'  ,'FA26', 850.00,125.00,65.40,'2026-07-01','Selected'),
+('AP009','A0007','BESE'  ,'FA26',1020.00,175.00,85.60,'2026-07-01','Selected'),
+('AP010','A0007','BSCS'  ,'FA26',1020.00,175.00,85.60,'2026-07-01','Rejected'),
+('AP011','A0008','BChemE','FA26', 800.00,110.00,58.20,'2026-07-02','Rejected'),
+('AP012','A0009','BSCS'  ,'FA26', 940.00,152.00,73.40,'2026-07-05','Selected'),
+('AP013','A0009','BESE'  ,'FA26', 940.00,152.00,73.40,'2026-07-05','Rejected'),
+('AP014','A0010','BECE'  ,'FA26', 860.00,145.00,69.80,'2026-07-07','Selected'),
+('AP015','A0011','BArch' ,'FA26', 970.00,160.00,77.90,'2026-07-08','Selected'),
+('AP016','A0011','BSAB'  ,'FA26', 970.00,160.00,77.90,'2026-07-08','Rejected'),
+('AP017','A0012','BSCS'  ,'FA26', 830.00,130.00,64.10,'2026-07-10','Waitlisted'),
+('AP018','A0013','BSAB'  ,'FA26', 960.00,155.00,75.20,'2026-07-12','Selected'),
+('AP019','A0014','BME'   ,'FA26', 790.00,115.00,57.60,'2026-07-15','Rejected'),
+('AP020','A0015','BBA'   ,'FA26', 890.00,130.00,66.80,'2026-07-18','Selected');
+
+-- 13. offer (12 rows — one per Selected application) ---------------------
+-- All offers are seeded with status='Issued'. The student inserts below cause
+-- auto_update_application_status to flip the matching offer to 'Accepted'.
+-- Offers OF006 (Omar/BSAF) and OF012 (Sara/BBA) stay 'Issued' because no
+-- student row is inserted for them in this seed.
+INSERT INTO offer (offer_id, application_id, issue_date, expiry_date, status) VALUES
+('OF001','AP001','2025-07-20','2025-08-20','Issued'),
+('OF002','AP002','2025-07-20','2025-08-20','Issued'),
+('OF003','AP004','2025-07-20','2025-08-20','Issued'),
+('OF004','AP005','2025-07-20','2025-08-20','Issued'),
+('OF005','AP006','2025-07-20','2025-08-20','Issued'),
+('OF006','AP008','2026-07-20','2026-08-20','Issued'),
+('OF007','AP009','2026-07-20','2026-08-20','Issued'),
+('OF008','AP012','2026-07-20','2026-08-20','Issued'),
+('OF009','AP014','2026-07-20','2026-08-20','Issued'),
+('OF010','AP015','2026-07-20','2026-08-20','Issued'),
+('OF011','AP018','2026-07-20','2026-08-20','Issued'),
+('OF012','AP020','2026-07-20','2026-08-20','Issued');
+
+-- 14. student (10 rows) --------------------------------------------------
+-- Inserting a student fires auto_update_application_status, promoting the
+-- matching application from 'Selected' to 'Enrolled' and the offer from
+-- 'Issued' to 'Accepted'. Cohort 1 (FA25) students are now in current_semester=2;
+-- Cohort 2 (FA26) students are starting current_semester=1.
+INSERT INTO student (student_id, program_id, applicant_id, full_name, email, current_semester, enrollment_date) VALUES
+('S001','BSCS' ,'A0001','Ali Khan'    ,'ali.khan@student.nust.edu.pk'    ,2,'2025-09-01'),
+('S002','BESE' ,'A0002','Aisha Ahmed' ,'aisha.ahmed@student.nust.edu.pk' ,2,'2025-09-01'),
+('S003','BME'  ,'A0003','Bilal Tariq' ,'bilal.tariq@student.nust.edu.pk' ,2,'2025-09-01'),
+('S004','BBA'  ,'A0004','Fatima Zahra','fatima.zahra@student.nust.edu.pk',2,'2025-09-01'),
+('S005','BSCS' ,'A0005','Saad Hussain','saad.hussain@student.nust.edu.pk',2,'2025-09-01'),
+('S006','BESE' ,'A0007','Zainab Rizvi','zainab.rizvi@student.nust.edu.pk',1,'2026-09-01'),
+('S007','BSCS' ,'A0009','Sana Iqbal'  ,'sana.iqbal@student.nust.edu.pk'  ,1,'2026-09-01'),
+('S008','BECE' ,'A0010','Usman Ali'   ,'usman.ali@student.nust.edu.pk'   ,1,'2026-09-01'),
+('S009','BArch','A0011','Hina Malik'  ,'hina.malik@student.nust.edu.pk'  ,1,'2026-09-01'),
+('S010','BSAB' ,'A0013','Noor Fatima' ,'noor.fatima@student.nust.edu.pk' ,1,'2026-09-01');
+
+-- 15. section ------------------------------------------------------------
+INSERT INTO section (section_id, course_code, term_id, classroom_id, faculty_id, section_label) VALUES
+-- Fall 2025 (FA25): Cohort 1 intro
+('SEC001','CS118' ,'FA25','R03','F001','A'),
+('SEC002','CS118' ,'FA25','R04','F004','B'),
+('SEC003','SE210' ,'FA25','R01','F003','A'),
+('SEC004','ME101' ,'FA25','R05','F005','A'),
+('SEC005','MGT101','FA25','R07','F007','A'),
+-- Spring 2026 (SP26): Cohort 1 progression
+('SEC006','CS212' ,'SP26','R03','F002','A'),
+('SEC007','CS220' ,'SP26','R01','F003','A'),
+('SEC008','ME201' ,'SP26','R05','F006','A'),
+('SEC009','FIN201','SP26','R08','F008','A'),
+-- Fall 2026 (FA26): Cohort 2 intro + Cohort 1 upper-level
+('SEC010','CS118' ,'FA26','R03','F001','A'),
+('SEC011','CS118' ,'FA26','R04','F004','B'),
+('SEC012','SE210' ,'FA26','R01','F003','A'),
+('SEC013','CE201' ,'FA26','R10','F010','A'),
+('SEC014','AR101' ,'FA26','R09','F009','A'),
+('SEC015','BS201' ,'FA26','R11','F011','A'),
+('SEC016','CS330' ,'FA26','R01','F002','A'),
+('SEC017','CS440' ,'FA26','R03','F001','A');
+
+-- 16. enrollment ---------------------------------------------------------
+-- Grade NULL = still in progress; grade set = section completed.
+INSERT INTO enrollment (student_id, section_id, attendance_percentage, grade) VALUES
 -- Fall 2025 (completed)
-( 1, 1,'A'  ,'Completed'),
-( 2, 1,'B+' ,'Completed'),
-( 5, 2,'B'  ,'Completed'),
-( 2, 3,'A'  ,'Completed'),
-( 3, 4,'A-' ,'Completed'),
-( 4, 5,'A'  ,'Completed'),
+('S001','SEC001',92.50,'A'),
+('S002','SEC001',89.00,'B+'),
+('S005','SEC002',85.50,'B'),
+('S002','SEC003',94.00,'A'),
+('S003','SEC004',90.00,'A-'),
+('S004','SEC005',95.00,'A'),
 -- Spring 2026 (completed)
-( 1, 6,'A-' ,'Completed'),
-( 5, 6,'B+' ,'Completed'),
-( 2, 7,'A-' ,'Completed'),
-( 1, 7,'B+' ,'Completed'),
-( 3, 8,'B+' ,'Completed'),
-( 4, 9,'A'  ,'Completed'),
--- Fall 2026 (in progress)
-( 6,10,NULL,'InProgress'),
-( 7,11,NULL,'InProgress'),
-( 8,13,NULL,'InProgress'),
-( 9,14,NULL,'InProgress'),
-(10,15,NULL,'InProgress'),
-( 6,12,NULL,'InProgress'),
-( 7,12,NULL,'InProgress'),
-( 1,16,NULL,'InProgress'),
-( 2,16,NULL,'InProgress'),
-( 5,17,NULL,'InProgress'),
-( 1,17,NULL,'InProgress'),
-( 4,10,NULL,'InProgress'),
-( 8,10,NULL,'InProgress'),
-( 9,12,NULL,'InProgress'),
-(10,10,NULL,'InProgress'),
-( 3,16,NULL,'InProgress'),
-( 8,12,NULL,'InProgress'),
-( 6,17,NULL,'InProgress');
+('S001','SEC006',91.00,'A-'),
+('S005','SEC006',88.50,'B+'),
+('S002','SEC007',93.00,'A-'),
+('S001','SEC007',87.00,'B+'),
+('S003','SEC008',89.50,'B+'),
+('S004','SEC009',94.50,'A'),
+-- Fall 2026 (in progress — grade NULL)
+('S006','SEC010',NULL,NULL),
+('S007','SEC011',NULL,NULL),
+('S008','SEC013',NULL,NULL),
+('S009','SEC014',NULL,NULL),
+('S010','SEC015',NULL,NULL),
+('S006','SEC012',NULL,NULL),
+('S007','SEC012',NULL,NULL),
+('S001','SEC016',NULL,NULL),
+('S002','SEC016',NULL,NULL),
+('S005','SEC017',NULL,NULL),
+('S001','SEC017',NULL,NULL),
+('S004','SEC010',NULL,NULL),
+('S008','SEC010',NULL,NULL),
+('S009','SEC012',NULL,NULL),
+('S010','SEC010',NULL,NULL),
+('S003','SEC016',NULL,NULL),
+('S008','SEC012',NULL,NULL),
+('S006','SEC017',NULL,NULL);
 
 -- =============================================================================
 -- VIEWS
 -- =============================================================================
 
--- Transcript: reach Applicant/Program through Application (no denormalization)
-CREATE VIEW StudentTranscript AS
+-- Per-enrollment transcript row. The student carries program_id and
+-- applicant_id directly, so the join graph is simpler than in a
+-- fully-normalized variant that would reach them through application.
+CREATE VIEW student_transcript AS
 SELECT
-    s.StudentID,
-    ap.FirstName,
-    ap.LastName,
-    pr.ProgramName,
-    c.CourseCode,
-    c.CourseName,
-    t.TermName,
-    e.Grade,
-    e.Status AS EnrollmentStatus
-FROM Student     s
-JOIN Application app ON app.ApplicationID = s.ApplicationID
-JOIN Applicant   ap  ON ap.ApplicantID    = app.ApplicantID
-JOIN Program     pr  ON pr.ProgramID      = app.ProgramID
-JOIN Enrollment  e   ON e.StudentID       = s.StudentID
-JOIN Section     sec ON sec.SectionID     = e.SectionID
-JOIN Course      c   ON c.CourseID        = sec.CourseID
-JOIN Term        t   ON t.TermID          = sec.TermID;
+    s.student_id,
+    s.full_name,
+    pr.program_id,
+    pr.program_name,
+    c.course_code,
+    c.course_title,
+    t.term_name,
+    t.academic_year,
+    e.grade,
+    e.attendance_percentage
+FROM student     s
+JOIN program     pr  ON pr.program_id  = s.program_id
+JOIN enrollment  e   ON e.student_id   = s.student_id
+JOIN section     sec ON sec.section_id = e.section_id
+JOIN course      c   ON c.course_code  = sec.course_code
+JOIN term        t   ON t.term_id      = sec.term_id;
 
-CREATE VIEW ClassroomUtilization AS
+-- Per-classroom occupancy: how many scheduled sections each room hosts
+-- across every term.
+CREATE VIEW classroom_utilization AS
 SELECT
-    sch.Name             AS SchoolName,
-    cr.RoomNumber,
-    cr.Capacity,
-    cr.RoomType,
-    COUNT(sec.SectionID) AS SectionsHosted
-FROM Classroom cr
-JOIN School sch ON sch.SchoolID = cr.SchoolID
-LEFT JOIN Section sec ON sec.ClassroomID = cr.ClassroomID
-GROUP BY cr.ClassroomID, sch.Name, cr.RoomNumber, cr.Capacity, cr.RoomType;
+    cr.classroom_id,
+    cr.building,
+    cr.room_number,
+    cr.capacity,
+    COUNT(sec.section_id) AS sections_hosted
+FROM classroom cr
+LEFT JOIN section sec ON sec.classroom_id = cr.classroom_id
+GROUP BY cr.classroom_id, cr.building, cr.room_number, cr.capacity;
 
 -- =============================================================================
 -- STORED PROCEDURES AND FUNCTIONS
@@ -718,31 +716,20 @@ GROUP BY cr.ClassroomID, sch.Name, cr.RoomNumber, cr.Capacity, cr.RoomType;
 
 DELIMITER //
 
--- Procedure 1: Record a tuition payment for a given student.
--- The unified Fee ledger's XOR CHECK requires ApplicationID IS NULL for
--- non-Application fees, so we always pass NULL explicitly.
-CREATE PROCEDURE GenerateTuitionChallan(
-    IN p_student_id INT,
-    IN p_amount     DECIMAL(10, 2)
+-- Procedure: atomically accept an admission offer by inserting the student
+-- row. The auto_update_application_status trigger promotes the matching
+-- application from 'Selected' to 'Enrolled' and flips the offer from 'Issued'
+-- to 'Accepted'. The whole thing is wrapped in a transaction; any failure
+-- rolls back.
+CREATE PROCEDURE accept_admission(
+    IN p_student_id       VARCHAR(15),
+    IN p_program_id       VARCHAR(15),
+    IN p_applicant_id     VARCHAR(15),
+    IN p_full_name        VARCHAR(100),
+    IN p_email            VARCHAR(100),
+    IN p_enrollment_date  DATE
 )
 BEGIN
-    INSERT INTO Fee (ApplicationID, StudentID, FeeType, Amount, PaymentDate, Method)
-    VALUES (NULL, p_student_id, 'Tuition', p_amount, CURDATE(), 'Bank');
-END //
-
--- Procedure 2: Atomically accept an admission offer.
---   1. Create the Student row (fires AutoUpdateApplicationStatus,
---      promoting the Application from 'Selected' to 'Enrolled').
---   2. Record the first tuition payment against the new Student.
--- The whole thing is wrapped in a transaction; any failure rolls back.
-CREATE PROCEDURE AcceptAdmission(
-    IN p_application_id   INT,
-    IN p_enrollment_date  DATE,
-    IN p_tuition_amount   DECIMAL(10, 2)
-)
-BEGIN
-    DECLARE v_student_id INT;
-
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         ROLLBACK;
@@ -751,31 +738,30 @@ BEGIN
 
     START TRANSACTION;
 
-    INSERT INTO Student (ApplicationID, EnrollmentDate, CGPA, Status)
-    VALUES (p_application_id, p_enrollment_date, 0.00, 'Active');
-
-    SET v_student_id = LAST_INSERT_ID();
-
-    INSERT INTO Fee (ApplicationID, StudentID, FeeType, Amount, PaymentDate, Method)
-    VALUES (NULL, v_student_id, 'Tuition', p_tuition_amount, p_enrollment_date, 'Bank');
+    INSERT INTO student
+        (student_id, program_id, applicant_id, full_name, email,
+         current_semester, enrollment_date)
+    VALUES
+        (p_student_id, p_program_id, p_applicant_id, p_full_name, p_email,
+         1, p_enrollment_date);
 
     COMMIT;
 END //
 
--- Function 1: Is this applicant eligible for an Engineering program?
--- Eligibility = scored >= 140 on at least one Engineering NET.
-CREATE FUNCTION IsEligibleForEngineering(p_applicant_id INT)
+-- Function: is this applicant eligible for an Engineering program?
+-- Eligibility = scored >= 140 on at least one Engineering-type NET.
+CREATE FUNCTION is_eligible_for_engineering(p_applicant_id VARCHAR(15))
 RETURNS BOOLEAN
 READS SQL DATA
 DETERMINISTIC
 BEGIN
-    DECLARE v_max_score INT;
+    DECLARE v_max_score DECIMAL(5,2);
 
-    SELECT MAX(ts.Score) INTO v_max_score
-      FROM TestScore ts
-      JOIN EntryTest et ON et.TestID = ts.TestID
-     WHERE ts.ApplicantID = p_applicant_id
-       AND et.TestType    = 'Engineering';
+    SELECT MAX(ta.score) INTO v_max_score
+      FROM test_attempt ta
+      JOIN entry_test et ON et.test_id = ta.test_id
+     WHERE ta.applicant_id = p_applicant_id
+       AND et.test_type    = 'Engineering';
 
     RETURN (v_max_score >= 140);
 END //
@@ -786,30 +772,25 @@ DELIMITER ;
 -- TRANSACTION HANDLING EXAMPLE
 -- =============================================================================
 -- The block below demonstrates an explicit transaction from a client session.
--- It is commented out so that rerunning NUST.sql does not mutate seed data;
+-- It is commented out so rerunning NUST.sql does not mutate seed data;
 -- uncomment to exercise it interactively against a fresh load of the schema.
 --
--- Business scenario: applicant Sara (Application 20, Status='Selected') accepts
--- her BBA offer. Three things must happen atomically:
---   (1) Student row is inserted (this fires AutoUpdateApplicationStatus,
---       flipping Application 20 from 'Selected' to 'Enrolled').
---   (2) A tuition Fee row is recorded for the new student.
---   (3) If either step fails (e.g. the XOR CHECK on Fee rejects the row, or
---       the Application is not in 'Selected' state), the whole transaction
---       rolls back — no orphan Student, no orphan Fee.
+-- Business scenario: applicant Sara (application AP020, status='Selected')
+-- accepts her BBA offer. Inserting the student row fires
+-- auto_update_application_status, promoting AP020 to 'Enrolled' and flipping
+-- OF012 to 'Accepted'. If the insert fails, the whole transaction rolls back —
+-- no orphan Student, no drift in application / offer status.
 --
 -- START TRANSACTION;
---
---   INSERT INTO Student (ApplicationID, EnrollmentDate, CGPA, Status)
---   VALUES (20, '2026-09-01', 0.00, 'Active');
---
---   INSERT INTO Fee (ApplicationID, StudentID, FeeType, Amount, PaymentDate, Method)
---   VALUES (NULL,
---           (SELECT StudentID FROM Student WHERE ApplicationID = 20),
---           'Tuition', 120000.00, '2026-09-01', 'Bank');
---
+--   INSERT INTO student
+--     (student_id, program_id, applicant_id, full_name, email,
+--      current_semester, enrollment_date)
+--   VALUES
+--     ('S011','BBA','A0015','Sara Khan',
+--      'sara.khan@student.nust.edu.pk',1,'2026-09-01');
 -- COMMIT;
 -- -- On any error: ROLLBACK;
 --
 -- Equivalent single-call form using the stored procedure above:
--- CALL AcceptAdmission(20, '2026-09-01', 120000.00);
+-- CALL accept_admission('S011','BBA','A0015','Sara Khan',
+--                       'sara.khan@student.nust.edu.pk','2026-09-01');

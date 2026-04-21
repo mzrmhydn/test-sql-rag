@@ -4,7 +4,7 @@ erDiagram
     school ||--|{ program : "offers"
     school ||--|{ course  : "owns"
 
-    program ||--o{ student : "registers"
+    program ||--|{ student : "registers"
     program ||--|{ application : "receives"
     program ||--|{ program_course : "requires"
 

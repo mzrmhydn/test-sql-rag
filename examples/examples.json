@@ -1,90 +1,90 @@
 [
     {
         "question": "Which program received the most applications?",
-        "query": "SELECT Program.ProgramName, COUNT(Application.ApplicationID) AS ApplicationCount FROM Application INNER JOIN Program ON Program.ProgramID = Application.ProgramID GROUP BY Application.ProgramID ORDER BY ApplicationCount DESC LIMIT 5;"
+        "query": "SELECT p.program_name, COUNT(a.application_id) AS application_count FROM application a JOIN program p ON p.program_id = a.program_id GROUP BY a.program_id ORDER BY application_count DESC LIMIT 5;"
     },
     {
-        "question": "What is the average NET score per test type?",
-        "query": "SELECT EntryTest.TestType, AVG(TestScore.Score) AS AvgScore FROM TestScore INNER JOIN EntryTest ON EntryTest.TestID = TestScore.TestID GROUP BY EntryTest.TestType ORDER BY AvgScore DESC;"
+        "question": "What is the average test score per test type?",
+        "query": "SELECT et.test_type, AVG(ta.score) AS avg_score FROM test_attempt ta JOIN entry_test et ON et.test_id = ta.test_id GROUP BY et.test_type ORDER BY avg_score DESC;"
     },
     {
-        "question": "List all applicants who were selected for admission to BS Computer Science.",
-        "query": "SELECT Applicant.FirstName, Applicant.LastName FROM Applicant INNER JOIN Application ON Application.ApplicantID = Applicant.ApplicantID INNER JOIN Program ON Program.ProgramID = Application.ProgramID WHERE Program.DegreeType = 'BSCS' AND Application.Status IN ('Selected','Enrolled');"
+        "question": "List all applicants who were selected or enrolled in BS Computer Science.",
+        "query": "SELECT ap.full_name FROM applicant ap JOIN application a ON a.applicant_id = ap.applicant_id WHERE a.program_id = 'BSCS' AND a.status IN ('Selected', 'Enrolled');"
     },
     {
         "question": "How many students are enrolled in each program?",
-        "query": "SELECT Program.ProgramName, COUNT(Student.StudentID) AS StudentCount FROM Student INNER JOIN Application ON Application.ApplicationID = Student.ApplicationID INNER JOIN Program ON Program.ProgramID = Application.ProgramID GROUP BY Program.ProgramID ORDER BY StudentCount DESC;"
+        "query": "SELECT p.program_name, COUNT(s.student_id) AS student_count FROM student s JOIN program p ON p.program_id = s.program_id GROUP BY s.program_id ORDER BY student_count DESC;"
     },
     {
-        "question": "What are the top 5 highest NET scores of all time?",
-        "query": "SELECT Applicant.FirstName, Applicant.LastName, EntryTest.TestType, TestScore.Score FROM TestScore INNER JOIN Applicant ON Applicant.ApplicantID = TestScore.ApplicantID INNER JOIN EntryTest ON EntryTest.TestID = TestScore.TestID ORDER BY TestScore.Score DESC LIMIT 5;"
+        "question": "What are the top 5 highest test scores of all time?",
+        "query": "SELECT ap.full_name, et.test_type, ta.score FROM test_attempt ta JOIN applicant ap ON ap.applicant_id = ta.applicant_id JOIN entry_test et ON et.test_id = ta.test_id ORDER BY ta.score DESC LIMIT 5;"
     },
     {
-        "question": "How many rejected applicants scored above 140 in the NET?",
-        "query": "SELECT COUNT(DISTINCT Applicant.ApplicantID) AS RejectedHighScorers FROM Applicant INNER JOIN Application ON Application.ApplicantID = Applicant.ApplicantID WHERE Application.Status = 'Rejected' AND Applicant.ApplicantID IN (SELECT TestScore.ApplicantID FROM TestScore WHERE TestScore.Score > 140);"
+        "question": "How many rejected applicants had a best test score above 140?",
+        "query": "SELECT COUNT(DISTINCT ap.applicant_id) AS rejected_high_scorers FROM applicant ap JOIN application a ON a.applicant_id = ap.applicant_id WHERE a.status = 'Rejected' AND ap.best_test_score > 140;"
     },
     {
         "question": "Which school owns the most courses?",
-        "query": "SELECT School.Name, COUNT(Course.CourseID) AS CourseCount FROM Course INNER JOIN School ON School.SchoolID = Course.SchoolID GROUP BY School.SchoolID ORDER BY CourseCount DESC LIMIT 5;"
+        "query": "SELECT sc.school_name, COUNT(c.course_code) AS course_count FROM course c JOIN school sc ON sc.school_id = c.school_id GROUP BY c.school_id ORDER BY course_count DESC LIMIT 5;"
     },
     {
         "question": "List all courses offered by SEECS.",
-        "query": "SELECT Course.CourseCode, Course.CourseName, Course.Credits FROM Course INNER JOIN School ON School.SchoolID = Course.SchoolID WHERE School.Name = 'SEECS';"
+        "query": "SELECT c.course_code, c.course_title, c.credit_hours FROM course c WHERE c.school_id = 'SEECS';"
     },
     {
         "question": "Which courses are shared across multiple programs?",
-        "query": "SELECT Course.CourseCode, Course.CourseName, COUNT(ProgramCourse.ProgramID) AS NumPrograms FROM Course INNER JOIN ProgramCourse ON ProgramCourse.CourseID = Course.CourseID GROUP BY Course.CourseID HAVING NumPrograms > 1 ORDER BY NumPrograms DESC;"
+        "query": "SELECT c.course_code, c.course_title, COUNT(pc.program_id) AS num_programs FROM course c JOIN program_course pc ON pc.course_code = c.course_code GROUP BY c.course_code HAVING num_programs > 1 ORDER BY num_programs DESC;"
     },
     {
-        "question": "Which instructor is teaching the most sections in Fall 2025?",
-        "query": "SELECT Instructor.FirstName, Instructor.LastName, COUNT(Section.SectionID) AS SectionCount FROM Section INNER JOIN Instructor ON Instructor.InstructorID = Section.InstructorID INNER JOIN Term ON Term.TermID = Section.TermID WHERE Term.TermName = 'Fall 2025' GROUP BY Section.InstructorID ORDER BY SectionCount DESC LIMIT 5;"
+        "question": "Which faculty member is teaching the most sections in Fall 2025?",
+        "query": "SELECT f.full_name, COUNT(s.section_id) AS section_count FROM section s JOIN faculty f ON f.faculty_id = s.faculty_id JOIN term t ON t.term_id = s.term_id WHERE t.term_name = 'Fall' AND t.academic_year = 2025 GROUP BY s.faculty_id ORDER BY section_count DESC LIMIT 5;"
     },
     {
-        "question": "Show the full transcript (course, term, grade) for student 1.",
-        "query": "SELECT Course.CourseCode, Course.CourseName, Term.TermName, Enrollment.Grade, Enrollment.Status FROM Enrollment INNER JOIN Section ON Section.SectionID = Enrollment.SectionID INNER JOIN Course ON Course.CourseID = Section.CourseID INNER JOIN Term ON Term.TermID = Section.TermID WHERE Enrollment.StudentID = 1 ORDER BY Term.StartDate;"
+        "question": "Show the full transcript for student S001.",
+        "query": "SELECT c.course_code, c.course_title, t.term_name, t.academic_year, e.grade FROM enrollment e JOIN section sec ON sec.section_id = e.section_id JOIN course c ON c.course_code = sec.course_code JOIN term t ON t.term_id = sec.term_id WHERE e.student_id = 'S001' ORDER BY t.start_date;"
     },
     {
-        "question": "How many students are currently enrolled in 'Database Systems'?",
-        "query": "SELECT COUNT(*) AS EnrollmentCount FROM Enrollment INNER JOIN Section ON Section.SectionID = Enrollment.SectionID INNER JOIN Course ON Course.CourseID = Section.CourseID WHERE Course.CourseName = 'Database Systems' AND Enrollment.Status = 'InProgress';"
+        "question": "How many students are currently in progress in Database Systems?",
+        "query": "SELECT COUNT(*) AS enrollment_count FROM enrollment e JOIN section sec ON sec.section_id = e.section_id JOIN course c ON c.course_code = sec.course_code WHERE c.course_title = 'Database Systems' AND e.grade IS NULL;"
     },
     {
-        "question": "Which applicants scored above the average score of the test they took?",
-        "query": "SELECT Applicant.FirstName, Applicant.LastName, EntryTest.TestType, TestScore.Score FROM TestScore INNER JOIN Applicant ON Applicant.ApplicantID = TestScore.ApplicantID INNER JOIN EntryTest ON EntryTest.TestID = TestScore.TestID WHERE TestScore.Score > (SELECT AVG(ts2.Score) FROM TestScore ts2 WHERE ts2.TestID = TestScore.TestID);"
+        "question": "Which applicants scored above the average score for the test they took?",
+        "query": "SELECT ap.full_name, et.test_type, ta.score FROM test_attempt ta JOIN applicant ap ON ap.applicant_id = ta.applicant_id JOIN entry_test et ON et.test_id = ta.test_id WHERE ta.score > (SELECT AVG(ta2.score) FROM test_attempt ta2 WHERE ta2.test_id = ta.test_id);"
     },
     {
-        "question": "What is the conversion rate (applications to students) for each school?",
-        "query": "SELECT School.Name, COUNT(DISTINCT Application.ApplicationID) AS TotalApplications, COUNT(DISTINCT Student.StudentID) AS ConvertedStudents FROM School INNER JOIN Program ON Program.SchoolID = School.SchoolID LEFT JOIN Application ON Application.ProgramID = Program.ProgramID LEFT JOIN Student ON Student.ApplicationID = Application.ApplicationID GROUP BY School.SchoolID;"
-    },
-    {
-        "question": "Show all students with CGPA above 3.5.",
-        "query": "SELECT Student.StudentID, Applicant.FirstName, Applicant.LastName, Program.ProgramName, Student.CGPA FROM Student INNER JOIN Application ON Application.ApplicationID = Student.ApplicationID INNER JOIN Applicant ON Applicant.ApplicantID = Application.ApplicantID INNER JOIN Program ON Program.ProgramID = Application.ProgramID WHERE Student.CGPA > 3.5 ORDER BY Student.CGPA DESC;"
+        "question": "What is the conversion rate from applications to students for each school?",
+        "query": "SELECT sc.school_name, COUNT(DISTINCT a.application_id) AS total_applications, COUNT(DISTINCT st.student_id) AS converted_students FROM school sc JOIN program p ON p.school_id = sc.school_id LEFT JOIN application a ON a.program_id = p.program_id LEFT JOIN student st ON st.program_id = p.program_id GROUP BY sc.school_id;"
     },
     {
         "question": "Which classrooms are hosting more than 2 sections?",
-        "query": "SELECT Classroom.RoomNumber, School.Name AS SchoolName, COUNT(Section.SectionID) AS SectionsHosted FROM Classroom INNER JOIN School ON School.SchoolID = Classroom.SchoolID LEFT JOIN Section ON Section.ClassroomID = Classroom.ClassroomID GROUP BY Classroom.ClassroomID HAVING SectionsHosted > 2 ORDER BY SectionsHosted DESC;"
-    },
-    {
-        "question": "List all applicants from Lahore.",
-        "query": "SELECT Applicant.FirstName, Applicant.LastName, Applicant.Email FROM Applicant WHERE Applicant.City = 'Lahore';"
+        "query": "SELECT cl.building, cl.room_number, COUNT(s.section_id) AS sections_hosted FROM classroom cl LEFT JOIN section s ON s.classroom_id = cl.classroom_id GROUP BY cl.classroom_id HAVING sections_hosted > 2 ORDER BY sections_hosted DESC;"
     },
     {
         "question": "Which courses have no sections offered in Fall 2025?",
-        "query": "SELECT Course.CourseCode, Course.CourseName FROM Course LEFT JOIN Section ON Section.CourseID = Course.CourseID AND Section.TermID = (SELECT Term.TermID FROM Term WHERE Term.TermName = 'Fall 2025') WHERE Section.SectionID IS NULL;"
+        "query": "SELECT c.course_code, c.course_title FROM course c LEFT JOIN section s ON s.course_code = c.course_code AND s.term_id = (SELECT t.term_id FROM term t WHERE t.term_name = 'Fall' AND t.academic_year = 2025) WHERE s.section_id IS NULL;"
     },
     {
         "question": "Which core courses does the BS Computer Science program require in its first two semesters?",
-        "query": "SELECT Course.CourseCode, Course.CourseName, ProgramCourse.Semester FROM ProgramCourse INNER JOIN Course ON Course.CourseID = ProgramCourse.CourseID INNER JOIN Program ON Program.ProgramID = ProgramCourse.ProgramID WHERE Program.DegreeType = 'BSCS' AND ProgramCourse.CourseType = 'Core' AND ProgramCourse.Semester <= 2 ORDER BY ProgramCourse.Semester;"
+        "query": "SELECT c.course_code, c.course_title, pc.recommended_semester FROM program_course pc JOIN course c ON c.course_code = pc.course_code WHERE pc.program_id = 'BSCS' AND pc.is_core = TRUE AND pc.recommended_semester <= 2 ORDER BY pc.recommended_semester;"
     },
     {
-        "question": "Rank all applicants for BSCS by their best NET score.",
-        "query": "SELECT Application.ApplicationID, Applicant.FirstName, Applicant.LastName, MAX(TestScore.Score) AS BestScore, RANK() OVER (ORDER BY MAX(TestScore.Score) DESC) AS MeritRank FROM Application INNER JOIN Applicant ON Applicant.ApplicantID = Application.ApplicantID INNER JOIN Program ON Program.ProgramID = Application.ProgramID LEFT JOIN TestScore ON TestScore.ApplicantID = Applicant.ApplicantID WHERE Program.DegreeType = 'BSCS' GROUP BY Application.ApplicationID, Applicant.FirstName, Applicant.LastName;"
+        "question": "Rank all applicants for BSCS by their best test score.",
+        "query": "SELECT ap.applicant_id, ap.full_name, ap.best_test_score, RANK() OVER (ORDER BY ap.best_test_score DESC) AS merit_rank FROM applicant ap JOIN application a ON a.applicant_id = ap.applicant_id WHERE a.program_id = 'BSCS';"
     },
     {
         "question": "Which students have a failing grade (F) in any course?",
-        "query": "SELECT Student.StudentID, Applicant.FirstName, Applicant.LastName, Course.CourseCode, Enrollment.Grade FROM Enrollment INNER JOIN Student ON Student.StudentID = Enrollment.StudentID INNER JOIN Application ON Application.ApplicationID = Student.ApplicationID INNER JOIN Applicant ON Applicant.ApplicantID = Application.ApplicantID INNER JOIN Section ON Section.SectionID = Enrollment.SectionID INNER JOIN Course ON Course.CourseID = Section.CourseID WHERE Enrollment.Grade = 'F';"
+        "query": "SELECT s.full_name, c.course_code, c.course_title, e.grade FROM enrollment e JOIN student s ON s.student_id = e.student_id JOIN section sec ON sec.section_id = e.section_id JOIN course c ON c.course_code = sec.course_code WHERE e.grade = 'F' LIMIT 5;"
     },
     {
-        "question": "Show all applications and their statuses for applicant Bilal Tariq.",
-        "query": "SELECT Application.ApplicationID, Program.ProgramName, Application.Status, Application.ApplicationDate FROM Application INNER JOIN Applicant ON Applicant.ApplicantID = Application.ApplicantID INNER JOIN Program ON Program.ProgramID = Application.ProgramID WHERE Applicant.FirstName = 'Bilal' AND Applicant.LastName = 'Tariq';"
+        "question": "Show all applications and their statuses for applicant Ali Hassan.",
+        "query": "SELECT a.application_id, p.program_name, a.status, a.submission_date FROM application a JOIN applicant ap ON ap.applicant_id = a.applicant_id JOIN program p ON p.program_id = a.program_id WHERE ap.full_name = 'Ali Hassan';"
+    },
+    {
+        "question": "List all offers that are still awaiting acceptance.",
+        "query": "SELECT o.offer_id, ap.full_name, p.program_name, o.issue_date, o.expiry_date, o.status FROM offer o JOIN application a ON a.application_id = o.application_id JOIN applicant ap ON ap.applicant_id = a.applicant_id JOIN program p ON p.program_id = a.program_id WHERE o.status = 'Issued' LIMIT 5;"
+    },
+    {
+        "question": "What are the prerequisites for each course in the BSCS curriculum?",
+        "query": "SELECT c1.course_code AS course, c1.course_title, c2.course_code AS prereq_course, c2.course_title AS prereq_title FROM prerequisite pr JOIN course c1 ON c1.course_code = pr.course_code JOIN course c2 ON c2.course_code = pr.prereq_course_code WHERE pr.course_code IN (SELECT pc.course_code FROM program_course pc WHERE pc.program_id = 'BSCS') LIMIT 5;"
     }
 ]

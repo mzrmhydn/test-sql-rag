@@ -6,7 +6,7 @@ function App() {
     {
       role: 'ai',
       content:
-        "Hi! I'm your NUST University database assistant. Ask me anything about admissions, programs, students, courses, enrollments, fees, and more!",
+        "Hi! I'm your NUST University database assistant. Ask me anything about admissions, programs, students, courses, enrollments, and more!",
     },
   ]);
   const [input, setInput] = useState('');
