@@ -187,11 +187,15 @@ CREATE TABLE applicant (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE entry_test (
-    test_id      VARCHAR(15) NOT NULL,
-    test_type    ENUM('Engineering','Business','Architecture','Biosciences','Chemical') NOT NULL,
-    test_date    DATE        NOT NULL,
-    total_marks  SMALLINT    NOT NULL,
+    test_id       VARCHAR(15) NOT NULL,
+    academic_year SMALLINT    NOT NULL,
+    net_number    TINYINT     NOT NULL,
+    test_type     ENUM('Engineering','CS','Business','Architecture','Biosciences','Chemical') NOT NULL,
+    test_date     DATE        NOT NULL,
+    total_marks   SMALLINT    NOT NULL DEFAULT 200,
     PRIMARY KEY (test_id),
+    UNIQUE KEY uq_net_session (academic_year, net_number, test_type),
+    CONSTRAINT chk_net_number       CHECK (net_number BETWEEN 1 AND 4),
     CONSTRAINT chk_test_total_marks CHECK (total_marks > 0)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -583,38 +587,56 @@ INSERT INTO applicant (applicant_id, full_name, cnic, email, high_school_board, 
 ('A0014','Ahmed Raza'   ,'41303-4445556-4','ahmed.raza@test.com'   ,'FBISE'    , 790.00,115.00),
 ('A0015','Sara Khan'    ,'35202-5556667-5','sara.khan@test.com'    ,'AKU-EB'   , 890.00,130.00);
 
--- 10. entry_test (NETs by subject + intake year) ---------------------------
-INSERT INTO entry_test (test_id, test_type, test_date, total_marks) VALUES
-('T01','Engineering' ,'2025-01-15',200),  -- NET-1 Engineering (2025 intake)
-('T02','Business'    ,'2025-02-20',200),  -- NET-2 Business    (2025 intake)
-('T03','Architecture','2025-03-15',200),  -- NET-3 Architecture(2025 intake)
-('T04','Biosciences' ,'2025-04-20',200),  -- NET-4 Biosciences (2025 intake)
-('T05','Engineering' ,'2026-01-15',200),  -- NET-1 Engineering (2026 intake)
-('T06','Business'    ,'2026-02-20',200),  -- NET-2 Business    (2026 intake)
-('T07','Architecture','2026-03-15',200),  -- NET-3 Architecture(2026 intake)
-('T08','Biosciences' ,'2026-04-20',200),  -- NET-4 Biosciences (2026 intake)
-('T09','Chemical'    ,'2025-05-10',200),  -- NET-5 Chemical    (2025 intake)
-('T10','Chemical'    ,'2026-05-10',200);  -- NET-5 Chemical    (2026 intake)
+-- 10. entry_test (4 NET sessions per academic year, each leading to fall intake) ----
+INSERT INTO entry_test (test_id, academic_year, net_number, test_type, test_date, total_marks) VALUES
+-- 2025 intake: NET-1 (January)
+('T01', 2025, 1, 'Engineering',  '2025-01-15', 200),
+('T02', 2025, 1, 'Business',     '2025-01-20', 200),
+('T03', 2025, 1, 'Architecture', '2025-01-25', 200),
+('T04', 2025, 1, 'Biosciences',  '2025-02-01', 200),
+-- 2025 intake: NET-2 (March)
+('T05', 2025, 2, 'Engineering',  '2025-03-15', 200),
+('T06', 2025, 2, 'Business',     '2025-03-20', 200),
+-- 2025 intake: NET-3 (May)
+('T07', 2025, 3, 'Engineering',  '2025-05-15', 200),
+('T08', 2025, 3, 'CS',           '2025-05-20', 200),
+-- 2025 intake: NET-4 (July)
+('T09', 2025, 4, 'Engineering',  '2025-07-15', 200),
+('T10', 2025, 4, 'Business',     '2025-07-20', 200),
+('T11', 2025, 4, 'Chemical',     '2025-07-25', 200),
+-- 2026 intake: NET-1 (January)
+('T12', 2026, 1, 'Engineering',  '2026-01-15', 200),
+('T13', 2026, 1, 'Business',     '2026-01-20', 200),
+('T14', 2026, 1, 'Architecture', '2026-01-25', 200),
+('T15', 2026, 1, 'Biosciences',  '2026-02-01', 200),
+-- 2026 intake: NET-2 (March)
+('T16', 2026, 2, 'Engineering',  '2026-03-15', 200),
+('T17', 2026, 2, 'Business',     '2026-03-20', 200),
+-- 2026 intake: NET-3 (May)
+('T18', 2026, 3, 'Engineering',  '2026-05-15', 200),
+('T19', 2026, 3, 'CS',           '2026-05-20', 200),
+-- 2026 intake: NET-4 (July)
+('T20', 2026, 4, 'Engineering',  '2026-07-15', 200);
 
 -- 11. test_attempt (every applicant's best_test_score equals MAX attempt) ---
 INSERT INTO test_attempt (applicant_id, test_id, score) VALUES
 -- 2025 intake (FA25)
-('A0001','T01',155.00),  -- BSCS, Engineering NET
-('A0002','T01',168.00),  -- BESE, Engineering NET
-('A0003','T01',140.00),  -- BME, Engineering NET
-('A0004','T02',155.00),  -- BBA, Business NET
-('A0005','T01',140.00),  -- BSCS, Engineering NET
+('A0001', 'T01', 155.00),  -- Engineering NET-1 2025
+('A0002', 'T01', 168.00),  -- Engineering NET-1 2025
+('A0003', 'T01', 140.00),  -- Engineering NET-1 2025
+('A0004', 'T02', 155.00),  -- Business NET-1 2025
+('A0005', 'T01', 140.00),  -- Engineering NET-1 2025
 -- 2026 intake (FA26)
-('A0006','T06',125.00),  -- BSAF, Business NET
-('A0007','T05',175.00),  -- BESE, Engineering NET
-('A0008','T05',110.00),  -- BChemE, Engineering NET
-('A0009','T05',152.00),  -- BSCS, Engineering NET
-('A0010','T05',145.00),  -- BECE, Engineering NET
-('A0011','T07',160.00),  -- BArch, Architecture NET
-('A0012','T05',130.00),  -- BSCS, Engineering NET
-('A0013','T08',155.00),  -- BSAB, Biosciences NET
-('A0014','T05',115.00),  -- BME, Engineering NET
-('A0015','T06',130.00);  -- BBA, Business NET
+('A0006', 'T13', 125.00),  -- Business NET-1 2026
+('A0007', 'T12', 175.00),  -- Engineering NET-1 2026
+('A0008', 'T12', 110.00),  -- Engineering NET-1 2026
+('A0009', 'T12', 152.00),  -- Engineering NET-1 2026
+('A0010', 'T12', 145.00),  -- Engineering NET-1 2026
+('A0011', 'T14', 160.00),  -- Architecture NET-1 2026
+('A0012', 'T12', 130.00),  -- Engineering NET-1 2026
+('A0013', 'T15', 155.00),  -- Biosciences NET-1 2026
+('A0014', 'T12', 115.00),  -- Engineering NET-1 2026
+('A0015', 'T13', 130.00);  -- Business NET-1 2026
 
 -- 12. application (20 rows) ------------------------------------------------
 -- Rows with status='Selected' will be auto-promoted to 'Enrolled' by the

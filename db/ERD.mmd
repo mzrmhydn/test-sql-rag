@@ -114,9 +114,11 @@ erDiagram
         DECIMAL best_test_score
     }
     entry_test {
-        VARCHAR test_id PK
-        ENUM    test_type
-        DATE    test_date
+        VARCHAR  test_id PK
+        SMALLINT academic_year
+        TINYINT  net_number
+        ENUM     test_type
+        DATE     test_date
         SMALLINT total_marks
     }
     test_attempt {
