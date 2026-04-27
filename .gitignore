@@ -1,3 +1,5 @@
+.claude
+
 # Secrets / environment
 .env
 .env.*
